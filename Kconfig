@@ -1,0 +1,34 @@
+menu "XuanShu OS Configuration"
+
+config ARCH_X86_64
+    bool "x86_64 architecture"
+    default y
+
+config LOG_LEVEL
+    int "Log level (0=TRACE..5=PANIC)"
+    default 2
+    range 0 5
+
+config SMP
+    bool "Symmetric multiprocessing"
+    default n
+
+config NET_STACK
+    bool "Network stack"
+    default y
+
+config NET_TCP
+    bool "TCP support"
+    depends on NET_STACK
+    default n
+
+config DRIVER_E1000
+    bool "Intel e1000 NIC"
+    depends on NET_STACK
+    default y
+
+config FS_EXT2
+    bool "ext2 filesystem"
+    default n
+
+endmenu

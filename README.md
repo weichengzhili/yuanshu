@@ -1,2 +1,2 @@
-# Yuanshu
-Yuanshu os 操作系统
+# yuanshu
+yuanshu os 操作系统

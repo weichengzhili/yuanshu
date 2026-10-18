@@ -1,3 +1,5 @@
 /.idea/*
 /scripts/test.sh
-
+/tools/xso-idlc/target/*
+/tools/xso-idlc/build/*
+/init-xuanshu.sh

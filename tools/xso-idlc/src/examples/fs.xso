@@ -1,0 +1,57 @@
+// 玄枢文件系统边界定义
+@module(fs)
+@version(1)
+
+// ---- 枚举 ----
+@available(added=1)
+enum OpenFlags : u32 {
+    READ   = 0x01,
+    WRITE  = 0x02,
+    CREATE = 0x04,
+    TRUNC  = 0x08,
+    APPEND = 0x10,
+    EXCL   = 0x20,
+}
+
+// ---- 错误 ----
+@available(added=1)
+error FsError : i32 {
+    NotFound = 2,
+    NotDir   = 20,
+    IsDir    = 21,
+    Inval    = 22,
+    NoMem    = 12,
+    Perm     = 1,
+}
+
+// ---- 类型别名 ----
+@available(added=1)
+type Fd = i32;
+
+// ---- 结构体 ----
+@available(added=1)
+struct FileStat {
+    @field(1) ino:   u64,
+    @field(2) size:  i64,
+    @field(3) mode:  u32,
+    @field(4) nlink: u32,
+}
+
+// ---- 接口 ----
+@available(added=1)
+interface Vfs {
+    @method(1)
+    open(path: BorrowedStr, flags: OpenFlags) -> result<Fd, FsError>;
+
+    @method(2)
+    close(fd: Fd) -> result<unit, FsError>;
+
+    @method(3)
+    read(fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
+
+    @method(4)
+    write(fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
+
+    @method(5)
+    fstat(fd: Fd) -> result<FileStat, FsError>;
+}

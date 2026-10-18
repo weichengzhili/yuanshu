@@ -1,0 +1,9 @@
+[package]
+name = "xso-idlc"
+version = "0.1.0"
+authors = ["xujiafeng 1932034810@qq.com"]
+edition = "2024"
+description = "XuanShu IDL compiler"
+[[bin]]
+name='xso-idlc'
+path='src/main.rs'

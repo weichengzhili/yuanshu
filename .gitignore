@@ -3,3 +3,4 @@
 /tools/xso-idlc/target/*
 /tools/xso-idlc/build/*
 /init-xuanshu.sh
+/tools/xso-idlc/Cargo.lock

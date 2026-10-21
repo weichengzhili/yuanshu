@@ -1,0 +1,11 @@
+# 项目内构建配置
+#
+# 问题：项目路径包含非 ASCII 字符（如“元枢”），GNU 工具链的 ld.exe
+# 无法解析其中的目标文件（*.o），导致链接阶段报
+#   cannot find ...rcgu.o: No such file or directory
+#
+# 解决：改用 rust 自带的 lld（rust-lld），它对 UTF-8 路径支持良好，
+# 这样 `cargo build` 在默认 target 目录下也能正常链接。
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes"]

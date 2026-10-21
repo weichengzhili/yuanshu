@@ -1,8 +1,6 @@
-// 玄枢文件系统边界定义
 @module(fs)
 @version(1)
 
-// ---- 枚举 ----
 @available(added=1)
 enum OpenFlags : u32 {
     READ   = 0x01,
@@ -13,7 +11,6 @@ enum OpenFlags : u32 {
     EXCL   = 0x20,
 }
 
-// ---- 错误 ----
 @available(added=1)
 error FsError : i32 {
     NotFound = 2,
@@ -24,11 +21,10 @@ error FsError : i32 {
     Perm     = 1,
 }
 
-// ---- 类型别名 ----
 @available(added=1)
 type Fd = i32;
 
-// ---- 结构体 ----
+// 共享结构体：按值传递
 @available(added=1)
 struct FileStat {
     @field(1) ino:   u64,
@@ -37,21 +33,24 @@ struct FileStat {
     @field(4) nlink: u32,
 }
 
-// ---- 接口 ----
-@available(added=1)
+// 不透明接口：字段隐藏，只能通过指针
+@opaque
 interface Vfs {
+    // 借用 self（可多次调用）
     @method(1)
-    open(path: BorrowedStr, flags: OpenFlags) -> result<Fd, FsError>;
+    open(@borrowed self, path: BorrowedStr, flags: OpenFlags)
+        -> result<Fd, FsError>;
 
     @method(2)
-    close(fd: Fd) -> result<unit, FsError>;
+    close(@borrowed self, fd: Fd) -> result<unit, FsError>;
 
     @method(3)
-    read(fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
+    read(@borrowed self, fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
 
     @method(4)
-    write(fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
+    write(@borrowed self, fd: Fd, buf: Vec<u8>) -> result<i64, FsError>;
 
+    // 转移所有权：销毁自身
     @method(5)
-    fstat(fd: Fd) -> result<FileStat, FsError>;
+    destroy(@owned self) -> result<unit, FsError>;
 }

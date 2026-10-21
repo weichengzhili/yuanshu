@@ -6,11 +6,12 @@ pub struct CompileError {
     pub file: Option<String>,
     pub line: Option<usize>,
     pub column: Option<usize>,
+    pub hint: Option<String>,
 }
 
 impl CompileError {
     pub fn new(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), file: None, line: None, column: None }
+        Self { message: msg.into(), file: None, line: None, column: None, hint: None }
     }
     pub fn at(mut self, line: usize, column: usize) -> Self {
         self.line = Some(line);
@@ -19,6 +20,10 @@ impl CompileError {
     }
     pub fn in_file(mut self, f: impl Into<String>) -> Self {
         self.file = Some(f.into());
+        self
+    }
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 }
@@ -30,7 +35,11 @@ impl fmt::Display for CompileError {
             write!(f, "{}:", line)?;
             if let Some(col) = self.column { write!(f, "{}:", col)?; }
         }
-        write!(f, " error: {}", self.message)
+        write!(f, " error: {}", self.message)?;
+        if let Some(hint) = &self.hint {
+            write!(f, "\n  hint: {}", hint)?;
+        }
+        Ok(())
     }
 }
 

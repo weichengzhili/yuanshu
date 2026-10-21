@@ -1,7 +1,9 @@
 use crate::ast::*;
+use crate::bridge_ir::BridgeIr;
 use std::fmt::Write;
 
-pub fn generate(module: &Module) -> String {
+pub fn generate(ir: &BridgeIr) -> String {
+    let module = &ir.module;
     let mut out = String::new();
 
     writeln!(out, "# ABI Reference: {} v{}", module.name, module.version).unwrap();
@@ -13,7 +15,7 @@ pub fn generate(module: &Module) -> String {
         match item {
             Item::Enum(e) => gen_enum(&mut out, e),
             Item::Error(e) => gen_error(&mut out, e),
-            Item::Struct(s) => gen_struct(&mut out, s),
+            Item::Struct(s) => gen_struct(&mut out, ir, s),
             Item::Interface(i) => gen_interface(&mut out, i),
             Item::TypeAlias(t) => {
                 writeln!(out, "## Type `{}`", t.name).unwrap();
@@ -53,27 +55,61 @@ fn gen_error(out: &mut String, e: &ErrorDef) {
     writeln!(out).unwrap();
 }
 
-fn gen_struct(out: &mut String, s: &StructDef) {
-    writeln!(out, "## Struct `{}`", s.name).unwrap();
+fn gen_struct(out: &mut String, ir: &BridgeIr, s: &StructDef) {
+    writeln!(out, "## Struct `{}`{}", s.name,
+             if s.opaque { " (opaque)" } else { "" }).unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "| Field | Type |").unwrap();
-    writeln!(out, "|---|---|").unwrap();
-    for f in &s.fields {
-        writeln!(out, "| {} | `{:?}` |", f.name, f.ty).unwrap();
+
+    if let Some(layout) = ir.layout_of(&s.name) {
+        writeln!(out, "Size: `{}`  Align: `{}`", layout.size, layout.align).unwrap();
+        writeln!(out).unwrap();
+    }
+
+    if s.opaque {
+        writeln!(out, "Fields hidden by design; pass by `@owned` / `@borrowed` only.").unwrap();
+        writeln!(out).unwrap();
+        return;
+    }
+
+    writeln!(out, "| Field | Type | Offset |").unwrap();
+    writeln!(out, "|---|---|---|").unwrap();
+    if let Some(offsets) = ir.field_offsets(&s.name) {
+        for (fname, _, off) in offsets {
+            let ty = s.fields.iter().find(|f| &f.name == fname).map(|f| &f.ty);
+            writeln!(out, "| {} | `{:?}` | {} |", fname, ty, off).unwrap();
+        }
+    } else {
+        for f in &s.fields {
+            writeln!(out, "| {} | `{:?}` | - |", f.name, f.ty).unwrap();
+        }
     }
     writeln!(out).unwrap();
 }
 
 fn gen_interface(out: &mut String, i: &InterfaceDef) {
-    writeln!(out, "## Interface `{}`", i.name).unwrap();
+    writeln!(out, "## Interface `{}`{}", i.name,
+             if i.opaque { " (opaque)" } else { "" }).unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "| Method | Signature |").unwrap();
-    writeln!(out, "|---|---|").unwrap();
+    writeln!(out, "| Method | Self | Signature |").unwrap();
+    writeln!(out, "|---|---|---|").unwrap();
     for m in &i.methods {
+        let self_kind = match m.self_ownership {
+            Some(Ownership::Owned) => "@owned",
+            Some(Ownership::Borrowed) => "@borrowed",
+            Some(Ownership::Value) => "by value",
+            None => "-",
+        };
         let params = m.params.iter()
-            .map(|p| format!("{}: {:?}", p.name, p.ty))
+            .map(|p| {
+                let own = match p.ownership {
+                    Ownership::Owned => "@owned ",
+                    Ownership::Borrowed => "@borrowed ",
+                    Ownership::Value => "",
+                };
+                format!("{}{}: {:?}", own, p.name, p.ty)
+            })
             .collect::<Vec<_>>().join(", ");
-        writeln!(out, "| {} | ({}) -> {:?} |", m.name, params, m.ret).unwrap();
+        writeln!(out, "| {} | {} | ({}) -> {:?} |", m.name, self_kind, params, m.ret).unwrap();
     }
     writeln!(out).unwrap();
 }

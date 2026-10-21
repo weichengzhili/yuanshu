@@ -1,0 +1,46 @@
+@module(net)
+@version(1)
+
+@available(added=1)
+enum SocketType : u32 {
+    STREAM = 1,
+    DGRAM  = 2,
+    RAW    = 3,
+}
+
+@available(added=1)
+enum AddressFamily : u32 {
+    INET  = 2,
+    INET6 = 10,
+}
+
+@available(added=1)
+error NetError : i32 {
+    NotConnected = 107,
+    Already      = 114,
+    Timeout      = 110,
+    Proto        = 93,
+}
+
+@available(added=1)
+struct SockAddr {
+    @field(1) family: u16,
+    @field(2) port:   u16,
+    @field(3) addr:   u32,
+    @field(4) pad:    u32,
+}
+
+@opaque
+interface Socket {
+    @method(1)
+    send(@borrowed self, buf: Vec<u8>) -> result<i64, NetError>;
+
+    @method(2)
+    recv(@borrowed self, buf: Vec<u8>) -> result<i64, NetError>;
+
+    @method(3)
+    connect(@borrowed self, addr: SockAddr) -> result<unit, NetError>;
+
+    @method(4)
+    destroy(@owned self) -> result<unit, NetError>;
+}

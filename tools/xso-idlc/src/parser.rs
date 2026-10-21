@@ -26,47 +26,36 @@ impl Parser {
     fn check(&self, k: &TokenKind) -> bool { self.peek() == k }
 
     fn expect(&mut self, k: &TokenKind, what: &str) -> Result<Token> {
-        if self.check(k) {
-            Ok(self.advance())
-        } else {
+        if self.check(k) { Ok(self.advance()) }
+        else {
             let t = self.peek_tok();
-            Err(CompileError::new(format!(
-                "expected {}, got {:?}", what, t.kind
-            )).at(t.line, t.col))
+            Err(CompileError::new(format!("expected {}, got {:?}", what, t.kind))
+                .at(t.line, t.col))
         }
     }
 
-    fn expect_ident(&mut self) -> Result<String> {
-        match self.peek().clone() {
-            TokenKind::Ident(s) => { self.advance(); Ok(s) }
-            other => {
-                let t = self.peek_tok();
-                Err(CompileError::new(format!(
-                    "expected identifier, got {:?}", other
-                )).at(t.line, t.col))
-            }
-        }
-    }
-
-    /// 读取标识符，注解位置上关键字也视为标识符（`@module` / `@field` / `added=1` 等）
+    /// 接受关键字和标识符（修复 @module 报错）
     fn expect_ident_or_kw(&mut self) -> Result<String> {
         let tok = self.peek().clone();
-        let s: String = match tok {
+        let s = match tok {
             TokenKind::Ident(s) => s,
-            TokenKind::KwModule    => "module".into(),
-            TokenKind::KwVersion   => "version".into(),
-            TokenKind::KwEnum      => "enum".into(),
-            TokenKind::KwError     => "error".into(),
-            TokenKind::KwStruct    => "struct".into(),
+            TokenKind::KwModule => "module".into(),
+            TokenKind::KwVersion => "version".into(),
+            TokenKind::KwEnum => "enum".into(),
+            TokenKind::KwError => "error".into(),
+            TokenKind::KwStruct => "struct".into(),
             TokenKind::KwInterface => "interface".into(),
-            TokenKind::KwType      => "type".into(),
-            TokenKind::KwConst     => "const".into(),
-            TokenKind::KwUse       => "use".into(),
+            TokenKind::KwType => "type".into(),
+            TokenKind::KwConst => "const".into(),
+            TokenKind::KwUse => "use".into(),
             TokenKind::KwAvailable => "available".into(),
-            TokenKind::KwAdded     => "added".into(),
-            TokenKind::KwRemoved   => "removed".into(),
-            TokenKind::KwField     => "field".into(),
-            TokenKind::KwMethod    => "method".into(),
+            TokenKind::KwAdded => "added".into(),
+            TokenKind::KwRemoved => "removed".into(),
+            TokenKind::KwField => "field".into(),
+            TokenKind::KwMethod => "method".into(),
+            TokenKind::KwOpaque => "opaque".into(),
+            TokenKind::KwOwned => "owned".into(),
+            TokenKind::KwBorrowed => "borrowed".into(),
             other => {
                 let t = self.peek_tok();
                 return Err(CompileError::new(format!(
@@ -77,14 +66,15 @@ impl Parser {
         self.advance();
         Ok(s)
     }
-    /// 把当前 token 当作标识符字面量取出（关键字回退成文本），失败返回 None
-    fn take_ident_or_kw(&mut self) -> Option<String> {
+
+    fn expect_ident(&mut self) -> Result<String> {
         match self.peek().clone() {
-            TokenKind::Ident(s) => { self.advance(); Some(s) }
+            TokenKind::Ident(s) => { self.advance(); Ok(s) }
             other => {
-                let s = other.keyword_text()?.to_string();
-                self.advance();
-                Some(s)
+                let t = self.peek_tok();
+                Err(CompileError::new(format!(
+                    "expected identifier, got {:?}", other
+                )).at(t.line, t.col))
             }
         }
     }
@@ -101,7 +91,6 @@ impl Parser {
         }
     }
 
-    // ---- 顶层 ----
     fn parse_module(&mut self) -> Result<Module> {
         let mut name = String::from("unnamed");
         let mut version: u32 = 1;
@@ -109,16 +98,8 @@ impl Parser {
         while self.check(&TokenKind::At) {
             let ann = self.parse_annotation()?;
             match ann.name.as_str() {
-                "module" => {
-                    if let Some(n) = ann.ident_arg(0) {
-                        name = n.to_string();
-                    }
-                }
-                "version" => {
-                    if let Some(v) = ann.int_arg(0) {
-                        version = v as u32;
-                    }
-                }
+                "module" => if let Some(n) = ann.ident_arg(0) { name = n.to_string(); },
+                "version" => if let Some(v) = ann.int_arg(0) { version = v as u32; },
                 _ => {}
             }
         }
@@ -127,22 +108,21 @@ impl Parser {
         while !self.check(&TokenKind::Eof) {
             items.push(self.parse_item()?);
         }
-
         Ok(Module { name, version, items })
     }
 
     fn parse_item(&mut self) -> Result<Item> {
-        let _anns = self.parse_annotations()?;
+        let anns = self.parse_annotations()?;
+        let opaque = anns.iter().any(|a| a.name == "opaque");
 
         match self.peek().clone() {
             TokenKind::KwEnum => Ok(Item::Enum(self.parse_enum()?)),
             TokenKind::KwError => Ok(Item::Error(self.parse_error()?)),
-            TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct()?)),
-            TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface()?)),
+            TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct(opaque)?)),
+            TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface(opaque)?)),
             TokenKind::KwType => Ok(Item::TypeAlias(self.parse_type_alias()?)),
             TokenKind::KwUse => {
                 self.skip_use()?;
-                // use 不产生 item，递归解析下一个
                 if self.check(&TokenKind::Eof) {
                     Err(CompileError::new("use at end of file"))
                 } else {
@@ -152,15 +132,14 @@ impl Parser {
             other => {
                 let t = self.peek_tok();
                 Err(CompileError::new(format!(
-                    "expected item (enum/error/struct/interface/type), got {:?}", other
+                    "expected item, got {:?}", other
                 )).at(t.line, t.col))
             }
         }
     }
 
     fn skip_use(&mut self) -> Result<()> {
-        self.advance(); // use
-        // 吃掉到 ; 为止
+        self.advance();
         while !self.check(&TokenKind::Semicolon) && !self.check(&TokenKind::Eof) {
             self.advance();
         }
@@ -168,16 +147,12 @@ impl Parser {
         Ok(())
     }
 
-    // ---- enum / error ----
     fn parse_enum(&mut self) -> Result<EnumDef> {
         self.expect(&TokenKind::KwEnum, "'enum'")?;
         let name = self.expect_ident()?;
         let underlying = if self.check(&TokenKind::Colon) {
-            self.advance();
-            self.expect_ident()?
-        } else {
-            "u32".to_string()
-        };
+            self.advance(); self.expect_ident()?
+        } else { "u32".into() };
         self.expect(&TokenKind::LBrace, "'{'")?;
         let mut variants = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
@@ -196,11 +171,8 @@ impl Parser {
         self.expect(&TokenKind::KwError, "'error'")?;
         let name = self.expect_ident()?;
         let underlying = if self.check(&TokenKind::Colon) {
-            self.advance();
-            self.expect_ident()?
-        } else {
-            "i32".to_string()
-        };
+            self.advance(); self.expect_ident()?
+        } else { "i32".into() };
         self.expect(&TokenKind::LBrace, "'{'")?;
         let mut variants = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
@@ -215,8 +187,7 @@ impl Parser {
         Ok(ErrorDef { name, underlying, variants })
     }
 
-    // ---- struct ----
-    fn parse_struct(&mut self) -> Result<StructDef> {
+    fn parse_struct(&mut self, opaque: bool) -> Result<StructDef> {
         self.expect(&TokenKind::KwStruct, "'struct'")?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::LBrace, "'{'")?;
@@ -230,11 +201,10 @@ impl Parser {
             if self.check(&TokenKind::Comma) { self.advance(); }
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
-        Ok(StructDef { name, fields })
+        Ok(StructDef { name, opaque, fields })
     }
 
-    // ---- interface ----
-    fn parse_interface(&mut self) -> Result<InterfaceDef> {
+    fn parse_interface(&mut self, opaque: bool) -> Result<InterfaceDef> {
         self.expect(&TokenKind::KwInterface, "'interface'")?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::LBrace, "'{'")?;
@@ -243,12 +213,44 @@ impl Parser {
             let anns = self.parse_annotations()?;
             let mname = self.expect_ident()?;
             self.expect(&TokenKind::LParen, "'('")?;
+
+            // self 参数支持 @owned self / @borrowed self
+            let mut self_ownership = None;
             let mut params = Vec::new();
+
+            // 检测 self 参数：`@owned self` / `@borrowed self`
+            // 词法上 `@` 是独立的 At 记号，需先吃掉可选的 '@'
+            if self.check(&TokenKind::At) { self.advance(); }
+            if self.check(&TokenKind::KwOwned) || self.check(&TokenKind::KwBorrowed) {
+                let own_kw = self.peek().clone();
+                // 看是否是 "owned self" 或 "borrowed self"
+                let next_is_self = {
+                    let p = self.pos + 1;
+                    matches!(self.tokens.get(p).map(|t| &t.kind), Some(TokenKind::Ident(s)) if s == "self")
+                };
+                if next_is_self {
+                    self.advance();
+                    self.advance(); // 吃掉 self
+                    self_ownership = Some(if matches!(own_kw, TokenKind::KwOwned) {
+                        Ownership::Owned
+                    } else {
+                        Ownership::Borrowed
+                    });
+                    if self.check(&TokenKind::Comma) { self.advance(); }
+                }
+            }
+
             while !self.check(&TokenKind::RParen) {
+                // 参数所有权前缀：可选的 '@' 后接 owned / borrowed
+                let mut pown = Ownership::Value;
+                if self.check(&TokenKind::At) { self.advance(); }
+                if self.check(&TokenKind::KwOwned) { self.advance(); pown = Ownership::Owned; }
+                else if self.check(&TokenKind::KwBorrowed) { self.advance(); pown = Ownership::Borrowed; }
+
                 let pname = self.expect_ident()?;
                 self.expect(&TokenKind::Colon, "':'")?;
                 let pty = self.parse_type()?;
-                params.push(Param { name: pname, ty: pty });
+                params.push(Param { name: pname, ty: pty, ownership: pown });
                 if self.check(&TokenKind::Comma) { self.advance(); }
             }
             self.expect(&TokenKind::RParen, "')'")?;
@@ -256,14 +258,13 @@ impl Parser {
             let ret = self.parse_type()?;
             self.expect(&TokenKind::Semicolon, "';'")?;
             methods.push(Method {
-                name: mname, params, ret, annotations: anns,
+                name: mname, self_ownership, params, ret, annotations: anns,
             });
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
-        Ok(InterfaceDef { name, methods })
+        Ok(InterfaceDef { name, opaque, methods })
     }
 
-    // ---- type alias ----
     fn parse_type_alias(&mut self) -> Result<TypeAliasDef> {
         self.expect(&TokenKind::KwType, "'type'")?;
         let name = self.expect_ident()?;
@@ -273,28 +274,29 @@ impl Parser {
         Ok(TypeAliasDef { name, target })
     }
 
-    // ---- type ----
     fn parse_type(&mut self) -> Result<TypeRef> {
-        // 忽略 @owned / @borrowed 前缀
-        if self.check(&TokenKind::At) {
+        // 所有权前缀
+        if self.check(&TokenKind::KwOwned) {
             self.advance();
-            let _ = self.take_ident_or_kw().ok_or_else(|| {
-                let t = self.peek_tok();
-                CompileError::new(format!("expected annotation name, got {:?}", t.kind))
-                    .at(t.line, t.col)
-            })?;
+            let inner = self.parse_type()?;
+            return Ok(TypeRef::Owned(Box::new(inner)));
+        }
+        if self.check(&TokenKind::KwBorrowed) {
+            self.advance();
+            let inner = self.parse_type()?;
+            return Ok(TypeRef::Borrowed(Box::new(inner)));
         }
 
         let name = self.expect_ident()?;
 
         match name.as_str() {
-            "Vec" | "vec" => {
+            "Vec" => {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type()?;
                 self.expect(&TokenKind::Gt, "'>'")?;
                 Ok(TypeRef::Vec(Box::new(inner)))
             }
-            "Option" | "option" => {
+            "Option" => {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type()?;
                 self.expect(&TokenKind::Gt, "'>'")?;
@@ -317,7 +319,6 @@ impl Parser {
         }
     }
 
-    // ---- annotations ----
     fn parse_annotations(&mut self) -> Result<Vec<Annotation>> {
         let mut v = Vec::new();
         while self.check(&TokenKind::At) {
@@ -333,20 +334,17 @@ impl Parser {
         if self.check(&TokenKind::LParen) {
             self.advance();
             while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-                // 先看看是不是 key=value
                 let first = match self.peek().clone() {
                     TokenKind::Ident(s) => { self.advance(); AnnotationArg::Ident(s) }
+                    TokenKind::KwAdded => { self.advance(); AnnotationArg::Ident("added".into()) }
+                    TokenKind::KwRemoved => { self.advance(); AnnotationArg::Ident("removed".into()) }
                     TokenKind::Int(n) => { self.advance(); AnnotationArg::Int(n) }
                     TokenKind::Str(s) => { self.advance(); AnnotationArg::Str(s) }
-                    _ => match self.take_ident_or_kw() {
-                        // 关键字（added / removed / type ...）当普通标识符
-                        Some(s) => AnnotationArg::Ident(s),
-                        None => {
-                            let t = self.peek_tok();
-                            return Err(CompileError::new(format!(
-                                "unexpected annotation arg: {:?}", t.kind
-                            )).at(t.line, t.col));
-                        }
+                    other => {
+                        let t = self.peek_tok();
+                        return Err(CompileError::new(format!(
+                            "unexpected annotation arg: {:?}", other
+                        )).at(t.line, t.col));
                     }
                 };
                 if self.check(&TokenKind::Equals) {
@@ -359,14 +357,11 @@ impl Parser {
                         TokenKind::Int(n) => { self.advance(); AnnotationArg::Int(n) }
                         TokenKind::Ident(s) => { self.advance(); AnnotationArg::Ident(s) }
                         TokenKind::Str(s) => { self.advance(); AnnotationArg::Str(s) }
-                        _ => match self.take_ident_or_kw() {
-                            Some(s) => AnnotationArg::Ident(s),
-                            None => {
-                                let t = self.peek_tok();
-                                return Err(CompileError::new(format!(
-                                    "unexpected annotation value: {:?}", t.kind
-                                )).at(t.line, t.col));
-                            }
+                        other => {
+                            let t = self.peek_tok();
+                            return Err(CompileError::new(format!(
+                                "unexpected annotation value: {:?}", other
+                            )).at(t.line, t.col));
                         }
                     };
                     args.push((Some(key), val));

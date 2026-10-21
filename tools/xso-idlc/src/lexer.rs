@@ -2,43 +2,20 @@ use crate::diag::{CompileError, Result};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
+    // 声明关键字
     KwModule, KwVersion, KwEnum, KwError, KwStruct, KwInterface,
-    KwType, KwConst, KwUse, KwAvailable,
-    KwAdded, KwRemoved, KwField, KwMethod,
+    KwType, KwConst, KwUse,
+    // 注解关键字
+    KwAvailable, KwAdded, KwRemoved, KwField, KwMethod,
+    // 边界控制关键字
+    KwOpaque, KwOwned, KwBorrowed,
     Ident(String),
     Int(i64),
     Str(String),
     At, Colon, Semicolon, Comma, Equals,
     LBrace, RBrace, LParen, RParen,
-    LBracket, RBracket, Lt, Gt,
-    Arrow,
+    LBracket, RBracket, Lt, Gt, Arrow,
     Eof,
-}
-
-impl TokenKind {
-    /// 关键字对应的源码文本。
-    /// 注解名/注解参数位置上关键字要当普通标识符用（如 `@module`、`@available(added=1)`），
-    /// 因此需要反查回原始字符串。
-    pub fn keyword_text(&self) -> Option<&'static str> {
-        let s = match self {
-            TokenKind::KwModule => "module",
-            TokenKind::KwVersion => "version",
-            TokenKind::KwEnum => "enum",
-            TokenKind::KwError => "error",
-            TokenKind::KwStruct => "struct",
-            TokenKind::KwInterface => "interface",
-            TokenKind::KwType => "type",
-            TokenKind::KwConst => "const",
-            TokenKind::KwUse => "use",
-            TokenKind::KwAvailable => "available",
-            TokenKind::KwAdded => "added",
-            TokenKind::KwRemoved => "removed",
-            TokenKind::KwField => "field",
-            TokenKind::KwMethod => "method",
-            _ => return None,
-        };
-        Some(s)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +92,9 @@ impl<'a> Lexer<'a> {
                 "removed" => TokenKind::KwRemoved,
                 "field" => TokenKind::KwField,
                 "method" => TokenKind::KwMethod,
+                "opaque" => TokenKind::KwOpaque,
+                "owned" => TokenKind::KwOwned,
+                "borrowed" => TokenKind::KwBorrowed,
                 _ => TokenKind::Ident(id),
             };
             return Ok(Token { kind, line, col });
@@ -164,24 +144,24 @@ impl<'a> Lexer<'a> {
         let col = self.col;
         if self.peek() == Some(b'0') && self.peek2().map_or(false, |c| c == b'x' || c == b'X') {
             self.advance(); self.advance();
-            let hex_start = self.pos;
+            let s = self.pos;
             while self.peek().map_or(false, |c| c.is_ascii_hexdigit()) { self.advance(); }
-            let s = std::str::from_utf8(&self.src[hex_start..self.pos]).unwrap();
-            i64::from_str_radix(s, 16).map_err(|_| CompileError::new("invalid hex").at(line, col))
+            let txt = std::str::from_utf8(&self.src[s..self.pos]).unwrap();
+            i64::from_str_radix(txt, 16).map_err(|_| CompileError::new("invalid hex").at(line, col))
         } else {
-            let start = self.pos;
+            let s = self.pos;
             while self.peek().map_or(false, |c| c.is_ascii_digit()) { self.advance(); }
-            let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
-            s.parse::<i64>().map_err(|_| CompileError::new("invalid number").at(line, col))
+            let txt = std::str::from_utf8(&self.src[s..self.pos]).unwrap();
+            txt.parse::<i64>().map_err(|_| CompileError::new("invalid number").at(line, col))
         }
     }
 
     fn read_string(&mut self) -> Result<String> {
-        self.advance(); // opening "
-        let start = self.pos;
+        self.advance();
+        let s = self.pos;
         while self.peek().map_or(false, |c| c != b'"') { self.advance(); }
-        let s = String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
-        self.advance(); // closing "
-        Ok(s)
+        let txt = String::from_utf8_lossy(&self.src[s..self.pos]).to_string();
+        self.advance();
+        Ok(txt)
     }
 }

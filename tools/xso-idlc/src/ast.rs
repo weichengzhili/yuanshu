@@ -38,6 +38,7 @@ pub struct Variant {
 #[derive(Clone, Debug)]
 pub struct StructDef {
     pub name: String,
+    pub opaque: bool,
     pub fields: Vec<Field>,
 }
 
@@ -51,12 +52,14 @@ pub struct Field {
 #[derive(Clone, Debug)]
 pub struct InterfaceDef {
     pub name: String,
+    pub opaque: bool,
     pub methods: Vec<Method>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Method {
     pub name: String,
+    pub self_ownership: Option<Ownership>,
     pub params: Vec<Param>,
     pub ret: TypeRef,
     pub annotations: Vec<Annotation>,
@@ -66,6 +69,18 @@ pub struct Method {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    pub ownership: Ownership,
+}
+
+/// 所有权语义（边界控制核心）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership {
+    /// 按值传递
+    Value,
+    /// 借用：调用期间有效
+    Borrowed,
+    /// 转移所有权
+    Owned,
 }
 
 #[derive(Clone, Debug)]
@@ -83,12 +98,15 @@ pub enum TypeRef {
     Vec(Box<TypeRef>),
     Option(Box<TypeRef>),
     Result(Box<TypeRef>, Box<TypeRef>),
+    /// @owned T
+    Owned(Box<TypeRef>),
+    /// @borrowed T
+    Borrowed(Box<TypeRef>),
 }
 
 #[derive(Clone, Debug)]
 pub struct Annotation {
     pub name: String,
-    /// (key, value) —— key 为 None 表示位置参数
     pub args: Vec<(Option<String>, AnnotationArg)>,
 }
 
@@ -106,6 +124,12 @@ impl Annotation {
             _ => None,
         }
     }
+    pub fn ident_arg(&self, idx: usize) -> Option<&str> {
+        match &self.args.get(idx)?.1 {
+            AnnotationArg::Ident(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
     pub fn named_int(&self, key: &str) -> Option<i64> {
         for (k, v) in &self.args {
             if k.as_deref() == Some(key) {
@@ -113,12 +137,6 @@ impl Annotation {
             }
         }
         None
-    }
-    pub fn ident_arg(&self, idx: usize) -> Option<&str> {
-        match &self.args.get(idx)?.1 {
-            AnnotationArg::Ident(s) => Some(s.as_str()),
-            _ => None,
-        }
     }
 }
 
@@ -132,14 +150,11 @@ impl Module {
             Item::TypeAlias(t) => t.name == name,
         })
     }
-}
-
-impl TypeRef {
-    /// 转成 `TypeRef::Named` 里的名字（用于语义检查）
-    pub fn named(&self) -> Option<&str> {
-        match self {
-            TypeRef::Named(n) => Some(n),
-            _ => None,
+    pub fn is_opaque(&self, name: &str) -> bool {
+        match self.find_item(name) {
+            Some(Item::Struct(s)) => s.opaque,
+            Some(Item::Interface(i)) => i.opaque,
+            _ => false,
         }
     }
 }

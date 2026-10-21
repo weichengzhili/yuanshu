@@ -7,3 +7,9 @@ description = "XuanShu IDL compiler"
 [[bin]]
 name='xso-idlc'
 path='src/main.rs'
+
+[dependencies]
+
+[profile.release]
+lto = true
+strip = true

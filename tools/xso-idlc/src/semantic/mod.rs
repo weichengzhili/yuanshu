@@ -2,7 +2,7 @@ pub mod types;
 pub mod version;
 pub mod layout;
 
-use crate::ast::{ Module};
+use crate::ast::Module;
 use crate::diag::Result;
 
 pub fn analyze(module: &Module) -> Result<()> {

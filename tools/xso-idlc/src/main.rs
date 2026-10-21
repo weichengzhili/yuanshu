@@ -1,4 +1,5 @@
 mod ast;
+mod bridge_ir;
 mod codegen;
 mod diag;
 mod lexer;
@@ -10,113 +11,107 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-  let args: Vec<String> = std::env::args().collect();
-  match run(&args) {
-    Ok(()) => ExitCode::SUCCESS,
-    Err(e) => {
-      eprintln!("{}", e);
-      ExitCode::FAILURE
+    let args: Vec<String> = std::env::args().collect();
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
     }
-  }
 }
 
 fn run(args: &[String]) -> diag::Result<()> {
-  let mut input = None;
-  let mut cpp_out = None;
-  let mut rust_out = None;
-  let mut doc_out = None;
-  let mut test_out = None;
+    let mut input = None;
+    let mut anchor_out = None;
+    let mut cpp_out = None;
+    let mut rust_out = None;
+    let mut doc_out = None;
+    let mut test_out = None;
 
-  let mut i = 1;
-  while i < args.len() {
-    match args[i].as_str() {
-      "--input"    => { input    = Some(PathBuf::from(&args[i+1])); i += 2; }
-      "--cpp-out"  => { cpp_out  = Some(PathBuf::from(&args[i+1])); i += 2; }
-      "--rust-out" => { rust_out = Some(PathBuf::from(&args[i+1])); i += 2; }
-      "--doc-out"  => { doc_out  = Some(PathBuf::from(&args[i+1])); i += 2; }
-      "--test-out" => { test_out = Some(PathBuf::from(&args[i+1])); i += 2; }
-      "--help" | "-h" => {
-        print_help();
-        return Ok(());
-      }
-      "--version" | "-V" => {
-        println!("xso-idlc 0.1.0");
-        return Ok(());
-      }
-      other => {
-        return Err(diag::CompileError::new(
-          format!("unknown argument: {}", other)));
-      }
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--input"    => { input      = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--anchor"   => { anchor_out = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--cpp-out"  => { cpp_out    = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--rust-out" => { rust_out   = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--doc-out"  => { doc_out    = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--test-out" => { test_out   = Some(PathBuf::from(&args[i+1])); i += 2; }
+            "--help" | "-h" => { print_help(); return Ok(()); }
+            "--version" | "-V" => { println!("xso-idlc 0.1.0"); return Ok(()); }
+            other => return Err(diag::CompileError::new(format!("unknown argument: {}", other))),
+        }
     }
-  }
 
-  let input = input.ok_or_else(||
-      diag::CompileError::new("missing --input <file.xso>"))?;
+    let input = input.ok_or_else(|| diag::CompileError::new("missing --input <file.xso>"))?;
+    let src = fs::read_to_string(&input)
+        .map_err(|e| diag::CompileError::new(format!("cannot read {}: {}", input.display(), e)))?;
 
-  let src = fs::read_to_string(&input)
-      .map_err(|e| diag::CompileError::new(format!(
-        "cannot read {}: {}", input.display(), e)))?;
+    let module = parser::parse(&src)
+        .map_err(|e| e.in_file(input.display().to_string()))?;
+    eprintln!("[idlc] parsed '{}' v{} ({} items)",
+              module.name, module.version, module.items.len());
 
-  // 1. 词法 + 语法
-  let module = parser::parse(&src)
-      .map_err(|e| e.in_file(input.display().to_string()))?;
+    semantic::analyze(&module)
+        .map_err(|e| e.in_file(input.display().to_string()))?;
+    eprintln!("[idlc] semantic OK");
 
-  eprintln!("[idlc] parsed module '{}' v{} ({} items)",
-            module.name, module.version, module.items.len());
+    // 构建 Bridge IR（布局唯一真相）
+    let ir = bridge_ir::BridgeIr::build(&module);
+    eprintln!("[idlc] bridge IR: {} layouts, {} opaque",
+              ir.type_layouts.len(), ir.opaque_types.len());
 
-  // 2. 语义分析
-  semantic::analyze(&module)
-      .map_err(|e| e.in_file(input.display().to_string()))?;
-  eprintln!("[idlc] semantic analysis OK");
+    // 所有 codegen 统一消费 &ir，避免两端各自算布局
+    if let Some(path) = anchor_out {
+        let code = codegen::anchor::generate(&ir);
+        write_out(&path, &code)?;
+    }
+    if let Some(path) = cpp_out {
+        let code = codegen::cpp::generate(&ir);
+        write_out(&path, &code)?;
+    }
+    if let Some(path) = rust_out {
+        let code = codegen::rust::generate(&ir);
+        write_out(&path, &code)?;
+    }
+    if let Some(path) = doc_out {
+        let code = codegen::doc::generate(&ir);
+        write_out(&path, &code)?;
+    }
+    if let Some(path) = test_out {
+        let code = codegen::test::generate(&ir);
+        write_out(&path, &code)?;
+    }
 
-  // 3. 代码生成
-  if let Some(path) = cpp_out {
-    let code = codegen::cpp::generate(&module);
-    fs::write(&path, code)
-        .map_err(|e| diag::CompileError::new(format!(
-          "cannot write {}: {}", path.display(), e)))?;
-    eprintln!("[idlc] generated C++ header: {}", path.display());
-  }
+    Ok(())
+}
 
-  if let Some(path) = rust_out {
-    let code = codegen::rust::generate(&module);
-    fs::write(&path, code)
-        .map_err(|e| diag::CompileError::new(format!(
-          "cannot write {}: {}", path.display(), e)))?;
-    eprintln!("[idlc] generated Rust module: {}", path.display());
-  }
-
-  if let Some(path) = doc_out {
-    let doc = codegen::doc::generate(&module);
-    fs::write(&path, doc)
-        .map_err(|e| diag::CompileError::new(format!(
-          "cannot write {}: {}", path.display(), e)))?;
-    eprintln!("[idlc] generated doc: {}", path.display());
-  }
-
-  if let Some(path) = test_out {
-    let test = codegen::test::generate(&module);
-    fs::write(&path, test)
-        .map_err(|e| diag::CompileError::new(format!(
-          "cannot write {}: {}", path.display(), e)))?;
-    eprintln!("[idlc] generated test skeleton: {}", path.display());
-  }
-
-  Ok(())
+fn write_out(path: &PathBuf, code: &str) -> diag::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).ok();
+        }
+    }
+    fs::write(path, code)
+        .map_err(|e| diag::CompileError::new(format!("cannot write {}: {}", path.display(), e)))?;
+    eprintln!("[idlc] wrote {}", path.display());
+    Ok(())
 }
 
 fn print_help() {
-  println!("xso-idlc 0.1.0 - XuanShu IDL Compiler");
-  println!();
-  println!("USAGE:");
-  println!("    xso-idlc --input <file.xso> [options]");
-  println!();
-  println!("OPTIONS:");
-  println!("    --input    <path>  Input IDL file (required)");
-  println!("    --cpp-out  <path>  Generate C++ header");
-  println!("    --rust-out <path>  Generate Rust module");
-  println!("    --doc-out  <path>  Generate Markdown doc");
-  println!("    --test-out <path>  Generate test skeleton");
-  println!("    --help, -h         Show this help");
-  println!("    --version, -V      Show version");
+    println!("xso-idlc 0.1.0 — XuanShu IDL Compiler");
+    println!();
+    println!("USAGE:");
+    println!("    xso-idlc --input <file.xso> [options]");
+    println!();
+    println!("OPTIONS:");
+    println!("    --input    <path>   Input IDL (required)");
+    println!("    --anchor   <path>   Layout anchor header (for both C++ and Rust)");
+    println!("    --cpp-out  <path>   C++ header");
+    println!("    --rust-out <path>   Rust module");
+    println!("    --doc-out  <path>   Markdown doc");
+    println!("    --test-out <path>   Layout test scaffold");
+    println!("    --help, -h          This help");
+    println!("    --version, -V       Version");
 }

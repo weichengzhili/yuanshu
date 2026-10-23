@@ -23,6 +23,8 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub col: usize,
+    /// 完整 token span：字节区间 [start, end)
+    pub span: (usize, usize),
 }
 
 pub struct Lexer<'a> {
@@ -42,9 +44,16 @@ impl<'a> Lexer<'a> {
         loop {
             self.skip_ws_and_comments();
             if self.pos >= self.src.len() { break; }
-            tokens.push(self.next_token()?);
+            // 记录完整 span（不侵入各分支）
+            let start = self.pos;
+            let mut tok = self.next_token()?;
+            tok.span = (start, self.pos);
+            tokens.push(tok);
         }
-        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: self.col });
+        tokens.push(Token {
+            kind: TokenKind::Eof, line: self.line, col: self.col,
+            span: (self.pos, self.pos),
+        });
         Ok(tokens)
     }
 
@@ -75,7 +84,8 @@ impl<'a> Lexer<'a> {
         let col = self.col;
         let c = self.peek().unwrap();
 
-        if c.is_ascii_alphabetic() || c == b'_' {
+        // 标识符起始：ASCII 字母 / '_' / 非 ASCII（UTF-8 多字节首字节，支持 Unicode 标识符）
+        if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 {
             let id = self.read_ident();
             let kind = match id.as_str() {
                 "module" => TokenKind::KwModule,
@@ -97,17 +107,17 @@ impl<'a> Lexer<'a> {
                 "borrowed" => TokenKind::KwBorrowed,
                 _ => TokenKind::Ident(id),
             };
-            return Ok(Token { kind, line, col });
+            return Ok(Token { kind, line, col, span: (0, 0) });
         }
 
         if c.is_ascii_digit() {
             let n = self.read_number()?;
-            return Ok(Token { kind: TokenKind::Int(n), line, col });
+            return Ok(Token { kind: TokenKind::Int(n), line, col, span: (0, 0) });
         }
 
         if c == b'"' {
             let s = self.read_string()?;
-            return Ok(Token { kind: TokenKind::Str(s), line, col });
+            return Ok(Token { kind: TokenKind::Str(s), line, col, span: (0, 0) });
         }
 
         self.advance();
@@ -128,12 +138,13 @@ impl<'a> Lexer<'a> {
             b'-' if self.peek() == Some(b'>') => { self.advance(); TokenKind::Arrow }
             _ => return Err(CompileError::new(format!("unexpected char '{}'", c as char)).at(line, col)),
         };
-        Ok(Token { kind, line, col })
+        Ok(Token { kind, line, col, span: (0, 0) })
     }
 
     fn read_ident(&mut self) -> String {
         let start = self.pos;
-        while self.peek().map_or(false, |c| c.is_ascii_alphanumeric() || c == b'_') {
+        // 标识符续接：ASCII 字母数字 / '_' / 非 ASCII（UTF-8 续字节）
+        while self.peek().map_or(false, |c| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80) {
             self.advance();
         }
         String::from_utf8_lossy(&self.src[start..self.pos]).to_string()

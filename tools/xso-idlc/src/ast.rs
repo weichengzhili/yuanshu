@@ -39,6 +39,8 @@ pub struct Variant {
 pub struct StructDef {
     pub name: String,
     pub opaque: bool,
+    /// 泛型参数（如 struct Wrapper<T>）；单态化后会生成具体结构体
+    pub type_params: Vec<String>,
     pub fields: Vec<Field>,
 }
 
@@ -95,9 +97,15 @@ pub enum TypeRef {
     BorrowedStr,
     OwnedString,
     Named(String),
+    /// 用户泛型结构体的类型应用：`Wrapper<u32>`。单态化阶段会改写为 Named(单态名)
+    App { name: String, args: Vec<TypeRef> },
     Vec(Box<TypeRef>),
     Option(Box<TypeRef>),
     Result(Box<TypeRef>, Box<TypeRef>),
+    /// 关联容器 map<K,V>：边界上收敛为 XsoVec<XsoPair<K,V>>
+    Map(Box<TypeRef>, Box<TypeRef>),
+    /// 集合 set<T>：边界上收敛为 XsoVec<T>
+    Set(Box<TypeRef>),
     /// @owned T
     Owned(Box<TypeRef>),
     /// @borrowed T

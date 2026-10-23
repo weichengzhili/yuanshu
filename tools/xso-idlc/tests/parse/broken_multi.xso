@@ -1,0 +1,22 @@
+@module(broken)
+@version(1)
+
+error BrokenErr : i32 {
+    Bad = 1
+}
+
+struct Broken {
+    @field(1) ok: u32,
+    @field(2) missing_colon u32,
+    @field(3) also_ok: u8,
+}
+
+@opaque
+interface BrokenIface {
+    @method(1)
+    good(@borrowed self, a: u32) -> result<u32, BrokenErr>;
+    @method(2)
+    no_return(@borrowed self, a: u32);
+}
+
+blah blah

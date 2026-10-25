@@ -62,24 +62,6 @@ pub fn generate(ir: &BridgeIr) -> String {
         }),
         _ => false,
     });
-    let needs_box = module.items.iter().any(|it| match it {
-        Item::Struct(s) => s.fields.iter().any(|f| matches!(f.ty, TypeRef::Owned(_))),
-        Item::Interface(i) => i.methods.iter().any(|m| {
-            m.params.iter().any(|p| matches!(p.ty, TypeRef::Owned(_)))
-            || matches!(&m.ret, TypeRef::Result(ok, _) if !is_unit(ok)
-                && matches!(ok.as_ref(), TypeRef::Owned(_)))
-        }),
-        _ => false,
-    });
-    let needs_option = module.items.iter().any(|it| match it {
-        Item::Struct(s) => s.fields.iter().any(|f| matches!(f.ty, TypeRef::Option(_))),
-        Item::Interface(i) => i.methods.iter().any(|m| {
-            m.params.iter().any(|p| matches!(p.ty, TypeRef::Option(_)))
-            || matches!(&m.ret, TypeRef::Result(ok, _) if !is_unit(ok)
-                && matches!(ok.as_ref(), TypeRef::Option(_)))
-        }),
-        _ => false,
-    });
 
     if needs_pair {
         em.cpp_comment("中间布局：关联容器的键值对载体");
@@ -116,45 +98,6 @@ pub fn generate(ir: &BridgeIr) -> String {
         em.cpp_static_assert(
             &em.cpp_trivially_copyable(&carrier),
             "carrier must stay trivially copyable to be passed in registers");
-        em.blank();
-    }
-    // 所有权转移载体：析构回调产生方 drop；独占所有权（禁止拷贝）
-    if needs_box {
-        em.cpp_comment("所有权转移载体：ptr + 产生方 drop 壳，析构时回调，跨分配器安全释放。");
-        em.cpp_comment("独占所有权：禁止拷贝；它有析构，故 SysV ABI 下按内存传参（与 XsoVec 不同）。");
-        em.cpp_template("typename T");
-        em.cpp_struct_open(naming::BOX);
-        em.cpp_member("T*", "ptr");
-        em.stmt(&syntax::cpp::fn_ptr_member("void", "drop", "T*"));
-        em.stmt(&syntax::cpp::deleted(&format!("{}(const {}<T>&)", naming::BOX, naming::BOX)));
-        em.stmt(&syntax::cpp::deleted(
-            &format!("{}<T>& operator=(const {}<T>&)", naming::BOX, naming::BOX)));
-        em.stmt(&syntax::cpp::dtor_body(
-            naming::BOX, "if (drop && ptr) drop(ptr);"));
-        let cq = syntax::cpp::NOEXCEPT;
-        em.stmt(&syntax::cpp::method_one_line("T*", "get", "", &format!("const {}", cq), "return ptr"));
-        em.stmt(&syntax::cpp::explicit_bool("return ptr != nullptr"));
-        em.cpp_struct_close();
-        let bx = format!("{}<uint8_t>", naming::BOX);
-        em.cpp_static_assert(
-            &format!("{} == {}", syntax::cpp::sizeof_expr(&bx), naming::BOX_SIZE),
-            "owned carrier size drift");
-        em.cpp_static_assert(
-            &format!("{} == {}", syntax::cpp::alignof_expr(&bx), naming::BOX_ALIGN),
-            "owned carrier align drift");
-        em.blank();
-    }
-    // 可选值载体：标签 + 值
-    if needs_option {
-        em.cpp_comment("可选值载体：显式标签（0=None / 1=Some）+ 值，布局两端确定。");
-        em.cpp_template("typename T");
-        em.cpp_struct_open(naming::OPTION);
-        em.cpp_member("uint8_t", "tag");
-        em.cpp_member("T", "value");
-        let cq = syntax::cpp::NOEXCEPT;
-        em.stmt(&syntax::cpp::method_one_line("bool", "has_value", "", &format!("const {}", cq), "return tag != 0"));
-        em.stmt(&syntax::cpp::method_one_line("const T*", "get", "", &format!("const {}", cq), "return tag ? &value : nullptr"));
-        em.cpp_struct_close();
         em.blank();
     }
 
@@ -251,10 +194,9 @@ fn cpp_ffi_ty(ty: &TypeRef) -> String {
         TypeRef::Set(t) => naming::carrier(naming::VEC, &cpp_ffi_ty(t)),
         TypeRef::Map(k, v) => naming::carrier(naming::VEC,
             &naming::carrier(naming::PAIR, &format!("{}, {}", cpp_ffi_ty(k), cpp_ffi_ty(v)))),
-        // 所有权转移：XsoBox<T>（带 drop 壳）；可选值：XsoOption<T>（带标签）
-        TypeRef::Owned(t) => naming::carrier(naming::BOX, &cpp_elem(t)),
+        TypeRef::Owned(t) => format!("{}*", cpp_elem(t)),
         TypeRef::Borrowed(t) => format!("const {}*", cpp_elem(t)),
-        TypeRef::Option(t) => naming::carrier(naming::OPTION, &cpp_elem(t)),
+        TypeRef::Option(t) => format!("const {}*", cpp_elem(t)),
         TypeRef::Result(_, _) => "void*".to_string(),
     }
 }

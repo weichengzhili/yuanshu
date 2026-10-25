@@ -72,23 +72,13 @@ pub fn check_all(module: &Module) -> Result<()> {
                     }
                 }
             }
-            Item::Enum(e) => {
+            Item::Enum(e) | Item::Error(e) => {
                 let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
                 for v in &e.variants {
                     check_ident(&v.name)?;
                     if seen.insert(v.name.as_str(), ()).is_some() {
                         return Err(CompileError::new(format!(
-                            "duplicate variant '{}' in enum '{}'", v.name, e.name)));
-                    }
-                }
-            }
-            Item::Error(e) => {
-                let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
-                for v in &e.variants {
-                    check_ident(&v.name)?;
-                    if seen.insert(v.name.as_str(), ()).is_some() {
-                        return Err(CompileError::new(format!(
-                            "duplicate variant '{}' in error '{}'", v.name, e.name)));
+                            "duplicate variant '{}' in '{}'", v.name, e.name)));
                     }
                 }
             }
@@ -229,11 +219,6 @@ fn check_type(ty: &TypeRef, defined: &[&str], ctx_type: &str, ctx_member: &str, 
         TypeRef::Vec(inner) | TypeRef::Option(inner)
         | TypeRef::Owned(inner) | TypeRef::Borrowed(inner) | TypeRef::Set(inner) => {
             check_type(inner, defined, ctx_type, ctx_member, next)?;
-        }
-        // 泛型应用：单态化后应已改写；兜底校验其单态名
-        TypeRef::App { name, args } => {
-            let mangled = TypeRef::Named(crate::semantic::mono::mangle(name, args));
-            check_type(&mangled, defined, ctx_type, ctx_member, next)?;
         }
         TypeRef::Map(k, v) => {
             check_type(k, defined, ctx_type, ctx_member, next)?;

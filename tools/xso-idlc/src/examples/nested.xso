@@ -1,0 +1,31 @@
+@module(nested)
+@version(1)
+
+// 基础坐标结构
+struct Point {
+    x: i32
+    y: i32
+}
+
+// 按值内嵌另一个结构（嵌套结构模型）
+struct Rectangle {
+    top_left: Point
+    size: Point
+}
+
+// 复合嵌套：结构内嵌 结构数组 / 可选结构 / 关联容器(结构)
+struct Scene {
+    name: OwnedString
+    rects: Vec<Rectangle>
+    active: Option<Rectangle>
+    tags: Map<u32, Rectangle>
+    // 不透明结构只能按所有权/借用传递（指针），不能按值内嵌
+    root: @owned Node
+}
+
+// 不透明结构；递归通过 Vec 容器打破（而非按值自引用）
+@opaque
+struct Node {
+    value: u32
+    children: Vec<Node>
+}

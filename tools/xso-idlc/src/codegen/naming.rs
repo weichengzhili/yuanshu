@@ -20,17 +20,12 @@ pub const OPTION: &str = "XsoOption";
 /// 规范载体（XsoVec）的固定布局：{ ptr, len } —— 两端必须一致
 pub const CARRIER_SIZE: usize = 16;
 pub const CARRIER_ALIGN: usize = 8;
-/// 所有权载体（XsoBox）的固定布局：{ ptr, drop } —— 两端必须一致
-pub const BOX_SIZE: usize = 16;
-pub const BOX_ALIGN: usize = 8;
 
 // ===== anchor（布局唯一真相）常量前缀 =====
 pub const LAYOUT_PREFIX: &str = "XSO_LAYOUT_";
 pub const CHECKSUM_PREFIX: &str = "XSO_ABI_CHECKSUM_";
 pub const ALGO_VERSION: &str = "XSO_FINGERPRINT_ALGO_VERSION";
 pub const IR_VERSION_PREFIX: &str = "XSO_IR_VERSION_";
-/// C++/Rust 产物内的 IR 版本常量名（不带模块后缀）
-pub const IR_VERSION: &str = "XSO_IR_VERSION";
 pub const ANCHOR_HEADER: &str = "layout_anchor.h";
 
 // ===== 生成物中的辅助函数名 =====

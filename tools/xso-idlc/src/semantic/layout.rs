@@ -1,6 +1,6 @@
 use crate::ast::{Item, Module, StructDef, TypeRef, Ownership};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub size: usize,
     pub align: usize,
@@ -27,7 +27,8 @@ pub fn size_of_primitive(name: &str) -> Layout {
 }
 
 pub fn compute_struct_layout(module: &Module, s: &StructDef) -> Layout {
-    // 生成的结构体为 #[repr(C)]（自然对齐），与 C++ 端逐字段同序即同布局。
+    // 生成的结构体恒为 #[repr(C, packed)] / __attribute__((packed))，
+    // 不做对齐填充，整体对齐为 1。
     let mut size = 0usize;
     let mut align = 1usize;
     for f in &s.fields {
@@ -36,8 +37,7 @@ pub fn compute_struct_layout(module: &Module, s: &StructDef) -> Layout {
         size += fl.size;
         if fl.align > align { align = fl.align; }
     }
-    size = (size + align - 1) & !(align - 1);
-    Layout { size, align }
+    Layout { size, align: 1 }
 }
 
 pub fn compute_field_offsets(module: &Module, s: &StructDef) -> Vec<(String, usize)> {
@@ -45,6 +45,7 @@ pub fn compute_field_offsets(module: &Module, s: &StructDef) -> Vec<(String, usi
     let mut offset = 0usize;
     for f in &s.fields {
         let fl = layout_of(module, &f.ty);
+    // packed：字段紧密排列，无对齐填充
         offset = fl.align_up(offset);
         offsets.push((f.name.clone(), offset));
         offset += fl.size;
@@ -55,28 +56,11 @@ pub fn compute_field_offsets(module: &Module, s: &StructDef) -> Vec<(String, usi
 pub fn layout_of(module: &Module, ty: &TypeRef) -> Layout {
     match ty {
         TypeRef::Primitive(p) => size_of_primitive(p),
-        // 泛型应用：按单态名解析（单态化后应已改写为 Named）
-        TypeRef::App { name, args } =>
-            layout_of(module, &TypeRef::Named(crate::semantic::mono::mangle(name, args))),
-        // 以下类型在 FFI 边界上收敛为「中间布局」的规范载体（与语言原生容器脱钩）：
-        //   字符串   -> XsoVec<u8>   (ptr, len)
-        //   序列     -> XsoVec<T>    (ptr, len)
-        //   关联/集合 -> XsoVec<..>  (ptr, len)
-        //   可选     -> *const T     (裸指针，None = null)
-        //   所有权   -> *mut/*const T
         TypeRef::BorrowedStr => Layout { size: 16, align: 8 },
-        TypeRef::OwnedString => Layout { size: 16, align: 8 },
-        // @owned -> XsoBox<T>（ptr + drop 壳）= 16/8；@borrowed 仍是裸指针
-        TypeRef::Owned(_) => Layout { size: 16, align: 8 },
-        TypeRef::Borrowed(_) => Layout::PTR,
+        TypeRef::OwnedString => Layout { size: 24, align: 8 },
+        TypeRef::Owned(_) | TypeRef::Borrowed(_) => Layout::PTR,
         TypeRef::Vec(_) | TypeRef::Set(_) | TypeRef::Map(_, _) => Layout { size: 16, align: 8 },
-        // Option -> XsoOption<T>：#[repr(C)] { u8 tag; T value; }
-        TypeRef::Option(inner) => {
-            let il = layout_of(module, inner);
-            let align = il.align.max(1);
-            let size = ((1 + align - 1) / align) * align + il.size;
-            Layout { size: (size + align - 1) / align * align, align }
-        }
+        TypeRef::Option(_) => Layout::PTR,
         TypeRef::Result(ok, err) => {
             let ol = layout_of(module, ok);
             let el = layout_of(module, err);

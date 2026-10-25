@@ -65,8 +65,7 @@ pub fn generate(ir: &BridgeIr) -> String {
     em.blank();
 
     // ===== 中间布局：规范桥接载体 =====
-    if needs_xso_vec(module) || needs_xso_pair(module)
-        || needs_xso_box(module) || needs_xso_option(module) {
+    if needs_xso_vec(module) || needs_xso_pair(module) {
         em.rs_comment("===== 中间布局：规范桥接载体（两端逐字节一致） =====");
         if needs_xso_pair(module) {
             em.rs_repr_c();
@@ -110,57 +109,6 @@ pub fn generate(ir: &BridgeIr) -> String {
             em.rs_fn_one_line(false, "", "clone", "&self", "Self", "*self");
             em.rs_impl_close();
             em.rs_impl_open(&format!("Copy for {}", impl_ty));
-            em.rs_impl_close();
-            em.blank();
-        }
-        // 所有权转移载体：带 drop 壳（cxx 的 Box/Vec 思路），与借用视图严格分离
-        if needs_xso_box(module) {
-            em.rs_comment("所有权转移载体：ptr + 产生方提供的 drop 壳；跨分配器安全释放。");
-            em.rs_comment("注意：它有 Drop，因此不再平凡可拷贝，SysV ABI 下按内存传参（与 XsoVec 不同）。");
-            em.rs_repr_c();
-            em.rs_struct_open(&format!("{}<T>", naming::BOX));
-            em.rs_field("ptr", "*mut T");
-            em.rs_field("drop", "Option<unsafe extern \"C\" fn(*mut T)>");
-            em.rs_struct_close();
-            let bx = format!("{}<u8>", naming::BOX);
-            let bs = em.rs_size_of(&bx);
-            let ba = em.rs_align_of(&bx);
-            em.rs_assert_eq(&bs, &naming::BOX_SIZE.to_string());
-            em.rs_assert_eq(&ba, &naming::BOX_ALIGN.to_string());
-            let box_ty = format!("{}<T>", naming::BOX);
-            em.rs_impl_open(&box_ty);
-            em.rs_fn_one_line(true, "const", "is_null", "&self", "bool", "self.ptr.is_null()");
-            em.rs_fn_one_line(true, "const", "as_ptr", "&self", "*mut T", "self.ptr");
-            em.rs_impl_close();
-            // Drop：调用产生方的释放函数（保证跨分配器释放，且只释放一次）
-            em.rs_impl_open(&format!("Drop for {}", box_ty));
-            em.open(&syntax::rs::fn_decl_void(false, "drop", "&mut self"));
-            em.open("if !self.ptr.is_null() {");
-            em.open("if let Some(d) = self.drop {");
-            em.stmt("unsafe { d(self.ptr) }");
-            em.close("}");
-            em.close("}");
-            em.close("}");
-            em.rs_impl_close();
-            em.blank();
-        }
-        // 可选值载体：标签 + 值（避免 Rust Option 布局不确定）
-        if needs_xso_option(module) {
-            em.rs_comment("可选值载体：显式标签（0=None / 1=Some）+ 值，布局两端确定。");
-            em.rs_repr_c();
-            em.rs_struct_open(&format!("{}<T>", naming::OPTION));
-            em.rs_field("tag", "u8");
-            em.rs_field("value", &syntax::rs::maybe_uninit("T"));
-            em.rs_struct_close();
-            let opt_ty = format!("{}<T>", naming::OPTION);
-            em.rs_impl_open(&opt_ty);
-            em.rs_fn_one_line(true, "const", "is_some", "&self", "bool", "self.tag != 0");
-            em.rs_fn_one_line(true, "const", "is_none", "&self", "bool", "self.tag == 0");
-            em.rs_doc("# Safety");
-            em.rs_doc("仅当 is_some() 为真时可调用；否则读取未初始化内存。");
-            em.rs_fn_open(true, "unsafe", "value", "&self", "&T");
-            em.stmt("&*self.value.as_ptr()");
-            em.rs_fn_close();
             em.rs_impl_close();
             em.blank();
         }
@@ -223,11 +171,9 @@ fn ffi_ty(ty: &TypeRef) -> String {
         TypeRef::Set(t) => naming::carrier(naming::VEC, &ffi_ty(t)),
         TypeRef::Map(k, v) => naming::carrier(naming::VEC,
             &naming::carrier(naming::PAIR, &format!("{}, {}", ffi_ty(k), ffi_ty(v)))),
-        // 所有权转移：收敛为带 drop 壳的 XsoBox<T>（跨分配器安全释放）
-        TypeRef::Owned(t) => naming::carrier(naming::BOX, &rust_type(t)),
+        TypeRef::Owned(t) => format!("*mut {}", rust_type(t)),
         TypeRef::Borrowed(t) => format!("*const {}", rust_type(t)),
-        // 可选值：收敛为带标签的 XsoOption<T>
-        TypeRef::Option(t) => naming::carrier(naming::OPTION, &rust_type(t)),
+        TypeRef::Option(t) => format!("*const {}", rust_type(t)),
         TypeRef::Result(_, _) => "*const c_void".to_string(),
     }
 }
@@ -249,32 +195,6 @@ fn needs_xso_pair(module: &Module) -> bool {
         Item::Interface(i) => i.methods.iter().any(|m| {
             m.params.iter().any(|p| matches!(p.ty, TypeRef::Map(_, _)))
             || matches!(&m.ret, TypeRef::Result(ok, _) if matches!(ok.as_ref(), TypeRef::Map(_, _)))
-        }),
-        _ => false,
-    })
-}
-
-/// 边界上是否用到所有权载体（@owned -> XsoBox）
-fn needs_xso_box(module: &Module) -> bool {
-    module.items.iter().any(|it| match it {
-        Item::Struct(s) => s.fields.iter().any(|f| matches!(f.ty, TypeRef::Owned(_))),
-        Item::Interface(i) => i.methods.iter().any(|m| {
-            m.params.iter().any(|p| matches!(p.ty, TypeRef::Owned(_)))
-            || matches!(&m.ret, TypeRef::Result(ok, _) if !is_unit(ok)
-                && matches!(ok.as_ref(), TypeRef::Owned(_)))
-        }),
-        _ => false,
-    })
-}
-
-/// 边界上是否用到可选值载体（Option -> XsoOption）
-fn needs_xso_option(module: &Module) -> bool {
-    module.items.iter().any(|it| match it {
-        Item::Struct(s) => s.fields.iter().any(|f| matches!(f.ty, TypeRef::Option(_))),
-        Item::Interface(i) => i.methods.iter().any(|m| {
-            m.params.iter().any(|p| matches!(p.ty, TypeRef::Option(_)))
-            || matches!(&m.ret, TypeRef::Result(ok, _) if !is_unit(ok)
-                && matches!(ok.as_ref(), TypeRef::Option(_)))
         }),
         _ => false,
     })

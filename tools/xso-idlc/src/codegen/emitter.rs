@@ -28,29 +28,6 @@ impl Emitter {
         self.buf.push_str(&format!("{}{}\n", self.pad(), text));
     }
     pub fn blank(&mut self) { self.buf.push('\n'); }
-    /// 任意文本行（按当前缩进；用于 Markdown / 说明性文本）
-    pub fn line(&mut self, s: &str) {
-        self.buf.push_str(&format!("{}{}\n", self.pad(), s));
-    }
-
-    // ===================== Markdown（文档） =====================
-
-    pub fn md_heading(&mut self, level: usize, text: &str) {
-        self.line(&format!("{} {}", "#".repeat(level), text));
-    }
-    pub fn md_quote(&mut self, text: &str) { self.line(&format!("> {}", text)); }
-    /// 表格分隔行：`|---|---|`（n 列）
-    pub fn md_table_sep(&mut self, n: usize) {
-        let mut row = String::from("|");
-        for _ in 0..n { row.push_str("---|"); }
-        self.line(&row);
-    }
-    /// 表格数据行：`| c1 | c2 |`
-    pub fn md_table_row(&mut self, cells: &[String]) {
-        let mut row = String::from("|");
-        for c in cells { row.push_str(&format!(" {} |", c)); }
-        self.line(&row);
-    }
     /// 块开启：写出头行并增加缩进
     pub fn open(&mut self, header: &str) {
         self.buf.push_str(&format!("{}{}\n", self.pad(), header));
@@ -71,7 +48,6 @@ impl Emitter {
     pub fn rs_comment(&mut self, text: &str) { self.comment("//", text); }
     pub fn rs_doc(&mut self, text: &str) { self.comment(syntax::rs::DOC, text); }
     pub fn rs_allow(&mut self, items: &[&str]) { self.stmt(&syntax::rs::allow(items)); }
-    pub fn rs_attr(&mut self, name: &str) { self.stmt(&format!("#[{}]", name)); }
     pub fn rs_extern_crate(&mut self, name: &str) {
         self.stmt(&format!("extern crate {};", name));
     }

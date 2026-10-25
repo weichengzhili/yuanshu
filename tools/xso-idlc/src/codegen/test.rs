@@ -1,30 +1,24 @@
-//! 布局对拍测试脚手架：让测试自动校验两端布局一致。
-//! 通过 `Emitter` 的 Rust 语义方法产出，本文件不出现写死的 Rust 源码文本。
-
 use crate::bridge_ir::BridgeIr;
-use crate::codegen::emitter::Emitter;
-use crate::codegen::syntax::rs;
+use std::fmt::Write;
 
+/// 生成布局对拍测试：让测试自动校验两端布局
 pub fn generate(ir: &BridgeIr) -> String {
+    let mut out = String::new();
     let module = &ir.module;
-    let mut em = Emitter::new();
 
-    em.line(&format!("// AUTO-GENERATED layout tests for module '{}'", module.name));
-    em.blank();
-    em.rs_attr("cfg(test)");
-    em.rs_mod_open("layout_tests");
+    writeln!(out, "// AUTO-GENERATED layout tests for module '{}'", module.name).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "#[cfg(test)]").unwrap();
+    writeln!(out, "mod layout_tests {{").unwrap();
 
     for (name, layout) in &ir.type_layouts {
-        em.rs_attr("test");
-        let fn_name = format!("{}_size", name.to_lowercase());
-        em.open(&rs::fn_decl(false, "", &fn_name, "", ""));
-        em.rs_assert_eq(
-            &format!("std::mem::size_of::<super::{}_bridge::{}>()", module.name, name),
-            &layout.size.to_string(),
-        );
-        em.close("}");
+        writeln!(out, "    #[test]").unwrap();
+        writeln!(out, "    fn {}_size() {{", name.to_lowercase()).unwrap();
+        writeln!(out, "        assert_eq!(std::mem::size_of::<super::{}_bridge::{}>(), {});",
+                 module.name, name, layout.size).unwrap();
+        writeln!(out, "    }}").unwrap();
     }
 
-    em.rs_mod_close();
-    em.finish()
+    writeln!(out, "}}").unwrap();
+    out
 }

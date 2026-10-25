@@ -1,30 +1,33 @@
-@module(kvstore)
-@version(2)
+@module kvstore @version 2
 
-error KvError : i32 {
+enum KvError : i32 {
     NotFound = 1
     Full = 2
 }
 
-// 复杂数据结构：struct 字段直接内嵌 map / set（收敛为中间布局规范载体）
-struct Bucket {
-    @field(1) id:    u32,
-    @field(2) items: Map<u64, u64>,
-    @field(3) tags:  Set<u32>,
+struct Entry {
+    key: u64
+    val: u64
 }
 
-@opaque
+// 复杂数据结构：struct 字段直接内嵌 map / set（收敛为中间布局规范载体）
+struct Bucket {
+    id: u32
+    items: Map<u64, u64>
+    tags: Set<u32>
+}
+
 interface KvStore {
-    @method(1)
+    @borrowed self
     get(@borrowed self, k: u64) -> result<u64, KvError>;
-    @method(2)
-    put(@borrowed self, k: u64, v: u64) -> result<unit, KvError>;
+    @borrowed self
+    put(@borrowed self, k: u64, v: u64) -> result<(), KvError>;
     // 返回关联容器
-    @method(3)
+    @borrowed self
     snapshot(@borrowed self) -> result<Map<u64, u64>, KvError>;
     // 返回集合
-    @method(4)
+    @borrowed self
     tags(@borrowed self) -> result<Set<u32>, KvError>;
     @method(5)
-    destroy(@owned self) -> result<unit, KvError>;
+    destroy(@owned self) -> result<(), KvError>;
 }

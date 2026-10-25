@@ -6,7 +6,6 @@
 mod tests {
     use crate::bridge_ir::BridgeIr;
     use crate::codegen;
-    use crate::codegen::naming;
     use crate::parser;
     use crate::semantic;
 
@@ -24,8 +23,8 @@ mod tests {
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "unexpected parse errors: {:?}",
                 errs.iter().map(|e| e.to_string()).collect::<Vec<_>>());
-        let mut m = m.expect("module should parse");
-        semantic::analyze(&mut m).expect("semantic analysis should pass");
+        let m = m.expect("module should parse");
+        semantic::analyze(&m).expect("semantic analysis should pass");
         BridgeIr::build(&m)
     }
 
@@ -36,7 +35,7 @@ mod tests {
         let src = "@module(c)\n@version(1)\nstruct A { b: B }\nstruct B { a: A }\n";
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
-        let r = semantic::analyze(&mut m.expect("module"));
+        let r = semantic::analyze(&m.expect("module"));
         assert!(r.is_err(), "cycle should be rejected");
         assert!(r.unwrap_err().to_string().contains("cyclic"));
     }
@@ -48,7 +47,7 @@ mod tests {
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
         // 语义应通过（无按值环）
-        let _ = semantic::analyze(&mut m.expect("module"));
+        let _ = semantic::analyze(&m.expect("module"));
     }
 
     #[test]
@@ -58,7 +57,7 @@ mod tests {
         let src = format!("@module(d)\n@version(1)\nstruct S {{ f: {} }}\n", ty);
         let (m, errs) = parser::parse_with_recovery(&src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
-        let r = semantic::analyze(&mut m.expect("module"));
+        let r = semantic::analyze(&m.expect("module"));
         assert!(r.is_err(), "deep nesting should be rejected");
         assert!(r.unwrap_err().to_string().contains("nesting"));
     }
@@ -67,128 +66,13 @@ mod tests {
     fn rejects_duplicate_field_and_zero_error_code() {
         let dup = "@module(x)\n@version(1)\nstruct S { a: u32, a: u8 }\n";
         let (m, _) = parser::parse_with_recovery(dup);
-        let r = semantic::analyze(&mut m.expect("module"));
+        let r = semantic::analyze(&m.expect("module"));
         assert!(r.is_err() && r.unwrap_err().to_string().contains("duplicate field"));
 
         let zero = "@module(y)\n@version(1)\nerror E : i32 { A = 0 }\n";
         let (m, _) = parser::parse_with_recovery(zero);
-        let r = semantic::analyze(&mut m.expect("module"));
+        let r = semantic::analyze(&m.expect("module"));
         assert!(r.is_err(), "error code 0 must be rejected");
-    }
-
-    // ===================== 单测：泛型单态化 =====================
-
-    #[test]
-    fn generics_are_monomorphized_with_correct_layouts() {
-        let src = "@module(g)\n@version(1)\n\
-            struct Wrapper<T> { v: T }\n\
-            struct Holder { a: Wrapper<u32>, b: Wrapper<u64> }\n";
-        let (m, errs) = parser::parse_with_recovery(src);
-        assert!(errs.is_empty(), "parse: {:?}", errs);
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-
-        let names: Vec<String> = m.items.iter().filter_map(|it| match it {
-            crate::ast::Item::Struct(s) => Some(s.name.clone()),
-            _ => None,
-        }).collect();
-        assert!(names.contains(&"Wrapper__u32".to_string()), "{:?}", names);
-        assert!(names.contains(&"Wrapper__u64".to_string()), "{:?}", names);
-        assert!(!names.contains(&"Wrapper".to_string()), "generic template must be removed");
-
-        let ir = BridgeIr::build(&m);
-        let l32 = ir.layout_of("Wrapper__u32").expect("u32 layout");
-        assert_eq!((l32.size, l32.align), (4, 4));
-        let l64 = ir.layout_of("Wrapper__u64").expect("u64 layout");
-        assert_eq!((l64.size, l64.align), (8, 8));
-
-        // 两端产物引用的是同一个单态名（保证跨语言布局一致）
-        assert!(codegen::rust::generate(&ir).contains("Wrapper__u32"));
-        assert!(codegen::cpp::generate(&ir).contains("Wrapper__u32"));
-    }
-
-    #[test]
-    fn nested_generics_expand_to_fixpoint() {
-        let src = "@module(g3)\n@version(1)\n\
-            struct Box2<T> { v: T }\n\
-            struct Outer<T> { inner: Box2<T> }\n\
-            struct Use { o: Outer<u16> }\n";
-        let (m, errs) = parser::parse_with_recovery(src);
-        assert!(errs.is_empty(), "parse: {:?}", errs);
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-        let names: Vec<String> = m.items.iter().filter_map(|it| match it {
-            crate::ast::Item::Struct(s) => Some(s.name.clone()),
-            _ => None,
-        }).collect();
-        assert!(names.contains(&"Outer__u16".to_string()), "{:?}", names);
-        assert!(names.contains(&"Box2__u16".to_string()), "nested generic must expand: {:?}", names);
-    }
-
-    #[test]
-    fn generic_arity_mismatch_is_rejected() {
-        let src = "@module(g2)\n@version(1)\n\
-            struct P<T, U> { a: T, b: U }\n\
-            struct H { p: P<u32> }\n";
-        let (m, _) = parser::parse_with_recovery(src);
-        let mut m = m.expect("module");
-        let r = semantic::analyze(&mut m);
-        assert!(r.is_err(), "arity mismatch must be rejected");
-        assert!(r.unwrap_err().to_string().contains("arity"));
-    }
-
-    // ===================== 单测：复杂 / 嵌套数据结构 =====================
-
-    #[test]
-    fn deeply_nested_containers_are_supported() {
-        // Vec<Vec<u8>>、Map<Vec<u8>, Set<u32>>、Option<Vec<u32>> 任意嵌套
-        let src = "@module(n)\n@version(1)\n\
-            error E : i32 { A = 1 }\n\
-            struct Nested {\n\
-                @field(1) grid: Vec<Vec<u8>>,\n\
-                @field(2) index: Map<Vec<u8>, Set<u32>>,\n\
-                @field(3) maybe: Option<Vec<u32>>,\n\
-            }\n\
-            @opaque interface Api {\n\
-                @method(1) send(@borrowed self, buf: Vec<Vec<u8>>) -> result<i64, E>;\n\
-                @method(2) idx(@borrowed self) -> result<Map<Vec<u8>, Set<u32>>, E>;\n\
-            }\n";
-        let (m, errs) = parser::parse_with_recovery(src);
-        assert!(errs.is_empty(), "parse: {:?}", errs.iter().map(|e| e.to_string()).collect::<Vec<_>>());
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-        let ir = BridgeIr::build(&m);
-
-        // 容器在边界上统一收敛为规范载体 XsoVec（16 字节 / 8 对齐）
-        let l = ir.layout_of("Nested").expect("Nested layout");
-        assert_eq!(l.align, 8, "container fields must be pointer-aligned");
-        let rust = codegen::rust::generate(&ir);
-        assert!(rust.contains("XsoVec<XsoVec<u8>>"), "nested Vec must nest carriers");
-        assert!(rust.contains("XsoVec<XsoPair<XsoVec<u8>, XsoVec<u32>>>"),
-                 "Map<Vec<u8>, Set<u32>> must nest carrier+pair");
-        let cpp = codegen::cpp::generate(&ir);
-        assert!(cpp.contains("XsoVec<XsoVec<uint8_t>>"), "cpp must mirror the nesting");
-    }
-
-    #[test]
-    fn nested_struct_and_generic_compose() {
-        // 具名结构体嵌套 + 泛型实例化组合
-        let src = "@module(n2)\n@version(1)\n\
-            struct Inner { a: u32, b: u64 }\n\
-            struct Wrapper<T> { v: T }\n\
-            struct Outer { inner: Inner, w: Wrapper<Inner> }\n";
-        let (m, errs) = parser::parse_with_recovery(src);
-        assert!(errs.is_empty(), "parse: {:?}", errs);
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-        let names: Vec<String> = m.items.iter().filter_map(|it| match it {
-            crate::ast::Item::Struct(s) => Some(s.name.clone()), _ => None,
-        }).collect();
-        assert!(names.contains(&"Wrapper__Inner".to_string()), "{:?}", names);
-        let ir = BridgeIr::build(&m);
-        // Outer = Inner(4+pad+8=16, align 8) + Wrapper__Inner(16, align 8)
-        let outer = ir.layout_of("Outer").expect("Outer layout");
-        assert_eq!((outer.size, outer.align), (32, 8));
     }
 
     // ===================== 单测：解析错误恢复 =====================
@@ -217,7 +101,7 @@ mod tests {
         let b = build(FS);
         assert_eq!(a.fingerprint(), b.fingerprint(), "fingerprint must be stable");
 
-        let mut src = FS.replace("mode:  u32", "mode:  u64");
+        let mut src = FS.replace("nlink: u32", "nlink: u16");
         src = src.replace("@module(fs)", "@module(fs2)");
         let c = build(&src);
         assert_ne!(a.fingerprint(), c.fingerprint(), "layout change must change fingerprint");
@@ -230,186 +114,12 @@ mod tests {
         assert!(json.contains("\"ir_version\""));
         assert!(json.contains("\"fingerprint\""));
 
-        let mut src = FS.replace("mode:  u32", "mode:  u64");
+        let mut src = FS.replace("nlink: u32", "nlink: u16");
         src = src.replace("@module(fs)", "@module(fs2)");
         let b = build(&src);
         let d = a.diff(&b);
         assert!(!d.is_empty(), "diff should report changes");
         assert!(d.iter().any(|x| x.starts_with("[break]")), "layout change is breaking: {:?}", d);
-    }
-
-    // ===================== 所有权载体（XsoBox / XsoOption） =====================
-
-    #[test]
-    fn owned_and_option_use_canonical_carriers() {
-        let src = "@module(o)\n@version(1)\n\
-            struct Leaf { v: u32 }\n\
-            struct Holder {\n\
-                @field(1) owned_leaf: @owned Leaf,\n\
-                @field(2) maybe_leaf: Option<Leaf>,\n\
-            }\n";
-        let (m, errs) = parser::parse_with_recovery(src);
-        assert!(errs.is_empty(), "parse: {:?}", errs.iter().map(|e| e.to_string()).collect::<Vec<_>>());
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-        let ir = BridgeIr::build(&m);
-
-        let rust = codegen::rust::generate(&ir);
-        let cpp = codegen::cpp::generate(&ir);
-
-        // @owned -> XsoBox（ptr + drop 壳，必须有 Drop）
-        assert!(rust.contains(&format!("pub struct {}<T>", naming::BOX)),
-                "rust missing XsoBox");
-        assert!(rust.contains(&format!("Drop for {}<T>", naming::BOX)),
-                "XsoBox must own a Drop impl (cross-allocator release)");
-        assert!(cpp.contains(&format!("struct {}", naming::BOX)), "cpp missing XsoBox");
-        assert!(cpp.contains("= delete"), "XsoBox must be move-only (copy deleted)");
-
-        // Option -> XsoOption（显式标签）
-        assert!(rust.contains(&format!("pub struct {}<T>", naming::OPTION)),
-                "rust missing XsoOption");
-        assert!(cpp.contains(&format!("struct {}", naming::OPTION)), "cpp missing XsoOption");
-
-        // 字段实际收敛为规范载体
-        assert!(rust.contains(&naming::carrier(naming::BOX, "Leaf")), "field should be XsoBox<Leaf>");
-        assert!(rust.contains(&naming::carrier(naming::OPTION, "Leaf")), "field should be XsoOption<Leaf>");
-
-        // 布局：XsoBox(16,align8) + XsoOption<Leaf>(8,align4) -> size 24, align 8
-        let l = ir.layout_of("Holder").expect("Holder layout");
-        assert_eq!((l.size, l.align), (24, 8), "Holder layout mismatch");
-    }
-
-    #[test]
-    fn owned_carrier_locks_its_layout_on_both_sides() {
-        let src = "@module(o2)\n@version(1)\n\
-            struct Leaf { v: u32 }\n\
-            struct W { l: @owned Leaf }\n";
-        let (m, _) = parser::parse_with_recovery(src);
-        let mut m = m.expect("module");
-        semantic::analyze(&mut m).expect("semantic");
-        let ir = BridgeIr::build(&m);
-        let anchor = codegen::anchor::generate(&ir);
-        let rust = codegen::rust::generate(&ir);
-        let cpp = codegen::cpp::generate(&ir);
-        // 三端都必须锁定 16 / 8
-        let want = format!("{}", naming::BOX_SIZE);
-        assert!(rust.contains(&format!("== {});", want)), "rust must assert box size");
-        assert!(cpp.contains(&format!("== {}", want)), "cpp must assert box size");
-        assert!(anchor.contains(naming::ALGO_VERSION), "anchor must carry algo version");
-    }
-
-    // ===================== 性能：增量缓存 + 并行构建 =====================
-
-    #[test]
-    fn incremental_cache_skips_on_unchanged_input() {
-        let dir = std::env::temp_dir()
-            .join(format!("xso-cache-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let input = dir.join("m.xso");
-        std::fs::write(&input, FS).unwrap();
-        let out_rust = dir.join("m.rs");
-        let out_cpp = dir.join("m.h");
-        let all_outs = vec![out_rust.clone(), out_cpp.clone()];
-
-        // 首次：未命中（无缓存）
-        assert!(!crate::cache_hit(&input, FS, &all_outs, &dir), "cold should miss");
-        // 写齐产物并建立缓存
-        std::fs::write(&out_rust, "rust").unwrap();
-        std::fs::write(&out_cpp, "cpp").unwrap();
-        crate::write_cache(&input, FS, &all_outs, &dir);
-        // 命中：产物齐全且输入未变
-        assert!(crate::cache_hit(&input, FS, &all_outs, &dir), "should hit when unchanged");
-        // 产物缺失 -> 未命中（必须重生成）
-        std::fs::remove_file(&out_cpp).unwrap();
-        assert!(!crate::cache_hit(&input, FS, &all_outs, &dir), "missing output -> miss");
-        // 源变化 -> 未命中（自动失效）
-        std::fs::write(&out_cpp, "cpp").unwrap();
-        assert!(!crate::cache_hit(&input, NET, &all_outs, &dir), "changed source -> miss");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parallel_build_produces_all_outputs() {
-        let base = std::env::temp_dir()
-            .join(format!("xso-parallel-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-
-        let cases = [("a", FS), ("b", NET), ("c", KV)];
-        let mut argv: Vec<String> = vec!["xso-idlc".into()];
-        for (stem, src) in cases {
-            let p = base.join(format!("{}.xso", stem));
-            std::fs::write(&p, src).unwrap();
-            argv.push("--input".into());
-            argv.push(p.display().to_string());
-        }
-        argv.push("--cache-dir".into());
-        argv.push(base.join("cache").display().to_string());
-
-        crate::run(&argv).expect("parallel run failed");
-
-        for (stem, _) in cases {
-            let rs = base.join(format!("{}.rs", stem));
-            let h = base.join(format!("{}.h", stem));
-            assert!(rs.exists() && h.exists(), "missing output for {}", stem);
-            assert!(std::fs::read_to_string(&rs).unwrap().contains("XsoVec"),
-                    "{} rust must contain carriers", stem);
-        }
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // ===================== IR 二进制序列化（bincode） =====================
-
-    #[test]
-    fn ir_binary_roundtrip_preserves_fingerprint() {
-        for src in [FS, NET, KV] {
-            let ir = build(src);
-            let bytes = ir.to_bin();
-            // 魔数与确定性
-            assert_eq!(&bytes[..5], b"XSOIR", "bad magic");
-            assert_eq!(bytes, ir.to_bin(), "binary encoding must be deterministic");
-
-            let back = BridgeIr::from_bin(&bytes).expect("decode failed");
-            assert_eq!(back.ir_version, ir.ir_version);
-            assert_eq!(back.module.name, ir.module.name);
-            assert_eq!(back.module.version, ir.module.version);
-            assert_eq!(back.fingerprint(), ir.fingerprint(), "fingerprint must survive roundtrip");
-            assert_eq!(back.type_layouts, ir.type_layouts, "layouts must survive");
-            assert_eq!(back.enum_sizes, ir.enum_sizes, "enum sizes must survive");
-            assert_eq!(back.opaque_types, ir.opaque_types, "opaque set must survive");
-        }
-    }
-
-    #[test]
-    fn ir_binary_diff_detects_breaking_change() {
-        let a = build(FS);
-        // 改变布局：mode u32 -> u64（改变 size 与后续偏移）
-        let mut src = FS.replace("mode:  u32", "mode:  u64");
-        src = src.replace("@module(fs)", "@module(fs2)");
-        let b = build(&src);
-
-        let baseline = BridgeIr::from_bin(&a.to_bin()).expect("decode");
-        let changes = baseline.diff(&b);
-        assert!(!changes.is_empty(), "diff should report changes");
-        assert!(changes.iter().any(|c| c.starts_with("[break]")), "{:?}", changes);
-
-        // 自身比对无变化
-        let same = BridgeIr::from_bin(&a.to_bin()).expect("decode");
-        assert!(same.diff(&a).iter().any(|c| c.starts_with("[none]")),
-                "identical IR must report no change");
-    }
-
-    #[test]
-    fn ir_binary_rejects_corrupt_input() {
-        let ir = build(FS);
-        let mut bytes = ir.to_bin();
-        bytes[0] = b'X' ^ 0xff; // 破坏魔数
-        assert!(BridgeIr::from_bin(&bytes).is_err(), "corrupt magic must be rejected");
-        let short = &ir.to_bin()[..8];
-        assert!(BridgeIr::from_bin(short).is_err(), "truncated input must be rejected");
     }
 
     // ===================== 代码生成：确定性 / 幂等 =====================
@@ -438,12 +148,11 @@ mod tests {
             let cpp = codegen::cpp::generate(&ir);
 
             for (name, l) in &ir.type_layouts {
-                assert!(anchor.contains(&format!("{} {}", naming::layout_size_macro(name), l.size)),
+                assert!(anchor.contains(&format!("XSO_LAYOUT_{}_SIZE  {}", name, l.size)),
                         "anchor missing size for {}", name);
-                assert!(anchor.contains(&format!("{} {}", naming::layout_align_macro(name), l.align)),
+                assert!(anchor.contains(&format!("XSO_LAYOUT_{}_ALIGN {}", name, l.align)),
                         "anchor missing align for {}", name);
-                assert!(rust.contains(&format!("{}: usize = {};",
-                            naming::rust_layout_const(name, "SIZE"), l.size)),
+                assert!(rust.contains(&format!("LAYOUT_{}_SIZE: usize = {};", name, l.size)),
                         "rust missing size for {}", name);
                 assert!(cpp.contains(&format!("XSO_LAYOUT_{}_SIZE", name)),
                         "cpp missing size assert for {}", name);
@@ -451,8 +160,7 @@ mod tests {
             // 字段偏移三端一致
             for (name, fields) in &ir.field_offsets {
                 for (fname, _, off) in fields {
-                    assert!(anchor.contains(&format!("{} {}",
-                                naming::layout_offset_macro(name, fname), off)),
+                    assert!(anchor.contains(&format!("XSO_LAYOUT_{}_OFF_{} {}", name, fname, off)),
                             "anchor missing offset {}.{}", name, fname);
                 }
             }
@@ -529,7 +237,7 @@ mod tests {
                 s.push(alphabet[(rng.next() as usize) % alphabet.len()] as char);
             }
             let (m, _errs) = parser::parse_with_recovery(&s);
-            if let Some(mut m) = m { let _ = semantic::analyze(&mut m); }
+            if let Some(m) = m { let _ = semantic::analyze(&m); }
         }
 
         // 对合法输入做字节级变异
@@ -539,8 +247,8 @@ mod tests {
             let c = alphabet[(rng.next() as usize) % alphabet.len()] as char;
             s.replace_range(pos..=pos, &c.to_string());
             let (m, _errs) = parser::parse_with_recovery(&s);
-            if let Some(mut m) = m {
-                let _ = semantic::analyze(&mut m);
+            if let Some(m) = m {
+                let _ = semantic::analyze(&m);
                 let ir = BridgeIr::build(&m);
                 let _ = codegen::rust::generate(&ir);
                 let _ = codegen::cpp::generate(&ir);

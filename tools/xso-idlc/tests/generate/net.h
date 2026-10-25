@@ -16,9 +16,9 @@ namespace xso::net::bridge {
     }
 
     // ABI 指纹：布局描述符的 FNV-1a 校验和（应与 anchor 头一致）
-    static constexpr uint32_t XSO_ABI_CHECKSUM_NET = 0xd2123373u;
+    static constexpr uint32_t XSO_ABI_CHECKSUM_NET = 0xac40acb0u;
     static constexpr uint32_t XSO_FINGERPRINT_ALGO_VERSION = 1u;
-    static constexpr uint32_t XSO_IR_VERSION = 1u;
+    static constexpr uint32_t IR_VERSION = 1u;
 
     // 中间布局：序列/切片/字符串/集合的统一载体 (ptr, len)，与 Rust 端逐字节一致
     // 它是**借用视图**（不拥有缓冲）；所有权转移请使用带 drop 壳的类型。

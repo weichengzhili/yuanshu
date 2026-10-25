@@ -3,11 +3,9 @@
 //!
 //! 同样通过 `Emitter` 产出，不在本文件写死源码文本。
 
-    let _ = syntax::cpp::DEFINE; // 宏名由 anchor_define 统一给出
 use crate::bridge_ir::BridgeIr;
 use crate::codegen::emitter::Emitter;
 use crate::codegen::naming;
-use crate::codegen::syntax;
 
 /// C 风格块注释
 fn c_comment(em: &mut Emitter, text: &str) {

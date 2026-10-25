@@ -1,4 +1,5 @@
-@module kvstore @version 2
+@module(kvstore)
+@version(2)
 
 enum KvError : i32 {
     NotFound = 1
@@ -18,16 +19,16 @@ struct Bucket {
 }
 
 interface KvStore {
-    @borrowed self
+    @method(1)
     get(@borrowed self, k: u64) -> result<u64, KvError>;
-    @borrowed self
-    put(@borrowed self, k: u64, v: u64) -> result<(), KvError>;
+    @method(2)
+    put(@borrowed self, k: u64, v: u64) -> result<unit, KvError>;
     // 返回关联容器
-    @borrowed self
+    @method(3)
     snapshot(@borrowed self) -> result<Map<u64, u64>, KvError>;
     // 返回集合
-    @borrowed self
+    @method(4)
     tags(@borrowed self) -> result<Set<u32>, KvError>;
     @method(5)
-    destroy(@owned self) -> result<(), KvError>;
+    destroy(@owned self) -> result<unit, KvError>;
 }

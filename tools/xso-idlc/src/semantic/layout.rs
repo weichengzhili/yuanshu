@@ -58,7 +58,7 @@ pub fn layout_of(module: &Module, ty: &TypeRef) -> Layout {
         TypeRef::Primitive(p) => size_of_primitive(p),
         TypeRef::BorrowedStr => Layout { size: 16, align: 8 },
         TypeRef::OwnedString => Layout { size: 24, align: 8 },
-        TypeRef::Owned(_) | TypeRef::Borrowed(_) => Layout::PTR,
+        TypeRef::Owned(_) | TypeRef::Borrowed(_) | TypeRef::App { .. } => Layout::PTR,
         TypeRef::Vec(_) | TypeRef::Set(_) | TypeRef::Map(_, _) => Layout { size: 16, align: 8 },
         TypeRef::Option(_) => Layout::PTR,
         TypeRef::Result(ok, err) => {
@@ -83,6 +83,7 @@ pub fn layout_of(module: &Module, ty: &TypeRef) -> Layout {
             }
             Layout::PTR
         }
+
     }
 }
 

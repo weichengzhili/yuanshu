@@ -20,6 +20,8 @@ pub struct BridgeIr {
     pub enum_sizes: BTreeMap<String, Layout>,
     /// 不透明类型集合
     pub opaque_types: BTreeSet<String>,
+    /// 反序列化得到的规范描述符（用于离线 IR 复算同一指纹）
+    pub descriptor_override: Option<String>,
 }
 
 impl BridgeIr {
@@ -31,6 +33,7 @@ impl BridgeIr {
             field_offsets: BTreeMap::new(),
             enum_sizes: BTreeMap::new(),
             opaque_types: BTreeSet::new(),
+            descriptor_override: None,
         };
 
         // 第一遍：识别 opaque
@@ -95,6 +98,7 @@ impl BridgeIr {
 
     /// 规范描述符：布局的唯一文本表示（排序后拼接），用于指纹与 diff
     pub fn canonical_descriptor(&self) -> String {
+        if let Some(d) = &self.descriptor_override { return d.clone(); }
         let mut d = String::new();
         d.push_str(&format!("ir={};algo={};module={};ver={}\n",
             self.ir_version, FINGERPRINT_ALGO_VERSION, self.module.name, self.module.version));
@@ -187,6 +191,12 @@ impl BridgeIr {
         s
     }
 
+    /// 编码为确定性二进制（实现见 `encode_bin`）
+    pub fn to_bin(&self) -> Vec<u8> { encode_bin(self) }
+
+    /// 由二进制解码（实现见 `decode_bin`）
+    pub fn from_bin(bytes: &[u8]) -> std::result::Result<Self, String> { decode_bin(bytes) }
+
     /// 与另一份 IR 对比，输出人类可读差异；前缀 [break] 表示破坏性变更
     pub fn diff(&self, other: &BridgeIr) -> Vec<String> {
         let mut out = Vec::new();
@@ -213,10 +223,15 @@ impl BridgeIr {
         }
         for (n, fields) in &self.field_offsets {
             if let Some(of) = other.field_offsets.get(n) {
-                for (fn_, _fl, off) in fields {
-                    if let Some((_, _, ooff)) = of.iter().find(|(x, _, _)| x == fn_) {
+                for (fn_, fl, off) in fields {
+                    if let Some((_, ofl, ooff)) = of.iter().find(|(x, _, _)| x == fn_) {
                         if off != ooff {
                             out.push(format!("[break] field '{}.{}' offset {} -> {}", n, fn_, off, ooff));
+                        }
+                        // 字段自身大小/对齐变化同样是 ABI 破坏
+                        if fl.size != ofl.size || fl.align != ofl.align {
+                            out.push(format!("[break] field '{}.{}' layout {} -> {}",
+                                n, fn_, layout_str(*fl), layout_str(*ofl)));
                         }
                     } else {
                         out.push(format!("[break] field '{}.{}' removed", n, fn_));
@@ -252,22 +267,22 @@ impl BridgeIr {
 
 const BIN_MAGIC: &[u8; 5] = b"XSOIR";
 
-pub fn to_bin(&self) -> Vec<u8> {
+pub fn encode_bin(ir: &BridgeIr) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(BIN_MAGIC);
-    b.push(self.ir_version as u8);
-    put_u32(&mut b, self.module.version);
-    put_str(&mut b, &self.module.name);
+    b.push(ir.ir_version as u8);
+    put_u32(&mut b, ir.module.version);
+    put_str(&mut b, &ir.module.name);
 
-    put_u32(&mut b, self.type_layouts.len() as u32);
-    for (n, l) in &self.type_layouts {
+    put_u32(&mut b, ir.type_layouts.len() as u32);
+    for (n, l) in &ir.type_layouts {
         put_str(&mut b, n);
         put_u64(&mut b, l.size as u64);
         put_u64(&mut b, l.align as u64);
     }
 
-    put_u32(&mut b, self.field_offsets.len() as u32);
-    for (n, fields) in &self.field_offsets {
+    put_u32(&mut b, ir.field_offsets.len() as u32);
+    for (n, fields) in &ir.field_offsets {
         put_str(&mut b, n);
         put_u32(&mut b, fields.len() as u32);
         for (fn_, fl, off) in fields {
@@ -278,23 +293,23 @@ pub fn to_bin(&self) -> Vec<u8> {
         }
     }
 
-    put_u32(&mut b, self.enum_sizes.len() as u32);
-    for (n, l) in &self.enum_sizes {
+    put_u32(&mut b, ir.enum_sizes.len() as u32);
+    for (n, l) in &ir.enum_sizes {
         put_str(&mut b, n);
         put_u64(&mut b, l.size as u64);
         put_u64(&mut b, l.align as u64);
     }
 
-    put_u32(&mut b, self.opaque_types.len() as u32);
-    for n in &self.opaque_types { put_str(&mut b, n); }
+    put_u32(&mut b, ir.opaque_types.len() as u32);
+    for n in &ir.opaque_types { put_str(&mut b, n); }
 
-    put_u32(&mut b, self.fingerprint());
-    put_str(&mut b, &self.canonical_descriptor());
+    put_u32(&mut b, ir.fingerprint());
+    put_str(&mut b, &ir.canonical_descriptor());
     b
 }
 
 /// 反序列化；失败返回原因字符串
-pub fn from_bin(bytes: &[u8]) -> std::result::Result<Self, String> {
+pub fn decode_bin(bytes: &[u8]) -> std::result::Result<BridgeIr, String> {
     let mut p = 0usize;
     if bytes.len() < BIN_MAGIC.len() || &bytes[..BIN_MAGIC.len()] != BIN_MAGIC {
         return Err("bad magic".into());
@@ -304,7 +319,7 @@ pub fn from_bin(bytes: &[u8]) -> std::result::Result<Self, String> {
     let (module_version, np) = get_u32(bytes, p)?; p = np;
     let (name, np) = get_str(bytes, p)?; p = np;
 
-    let mut ir = Self {
+    let mut ir = BridgeIr {
         ir_version,
         module: crate::ast::Module { name, version: module_version, items: Vec::new() },
         type_layouts: BTreeMap::new(),
@@ -406,6 +421,7 @@ fn ty_name(t: &TypeRef) -> String {
     match t {
         TypeRef::Primitive(p) => p.clone(),
         TypeRef::Named(n) => n.clone(),
+        TypeRef::App { name, args } => crate::semantic::mono::mangle(name, args),
         TypeRef::BorrowedStr => "BorrowedStr".into(),
         TypeRef::OwnedString => "OwnedString".into(),
         TypeRef::Vec(i) => format!("Vec<{}>", ty_name(i)),

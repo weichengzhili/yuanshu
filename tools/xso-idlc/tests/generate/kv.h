@@ -16,9 +16,9 @@ namespace xso::kvstore::bridge {
     }
 
     // ABI 指纹：布局描述符的 FNV-1a 校验和（应与 anchor 头一致）
-    static constexpr uint32_t XSO_ABI_CHECKSUM_KVSTORE = 0xebc18a72u;
+    static constexpr uint32_t XSO_ABI_CHECKSUM_KVSTORE = 0x4a4225acu;
     static constexpr uint32_t XSO_FINGERPRINT_ALGO_VERSION = 1u;
-    static constexpr uint32_t XSO_IR_VERSION = 1u;
+    static constexpr uint32_t IR_VERSION = 1u;
 
     // 中间布局：关联容器的键值对载体
     template <typename K, typename V>
@@ -56,6 +56,17 @@ namespace xso::kvstore::bridge {
             default: return false;
         }
     }
+
+    // 字段使用「中间布局」规范载体，保证与 anchor 断言、Rust 端逐字节一致。
+    struct Entry {
+        uint64_t key;
+        uint64_t val;
+    };
+    static_assert(std::is_trivially_copyable<Entry>::value, "shared struct must be trivially copyable to cross the boundary");
+    static_assert(sizeof(Entry) == XSO_LAYOUT_Entry_SIZE, "layout drift");
+    static_assert(alignof(Entry) == XSO_LAYOUT_Entry_ALIGN, "align drift");
+    static_assert(offsetof(Entry, key) == 0, "offset drift");
+    static_assert(offsetof(Entry, val) == 8, "offset drift");
 
     // 字段使用「中间布局」规范载体，保证与 anchor 断言、Rust 端逐字节一致。
     struct Bucket {

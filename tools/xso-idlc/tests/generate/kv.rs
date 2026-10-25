@@ -12,14 +12,16 @@ pub mod kvstore_bridge {
     pub type Result<T, E> = core::result::Result<T, E>;
 
     const LAYOUT_Bucket_SIZE: usize = 40;
-    const LAYOUT_Bucket_ALIGN: usize = 8;
+    const LAYOUT_Bucket_ALIGN: usize = 1;
+    const LAYOUT_Entry_SIZE: usize = 16;
+    const LAYOUT_Entry_ALIGN: usize = 1;
     const LAYOUT_KvError_SIZE: usize = 4;
     const LAYOUT_KvError_ALIGN: usize = 4;
 
     /// ABI 指纹：布局描述符的 FNV-1a 校验和（应与 anchor 头一致）
-    pub const XSO_ABI_CHECKSUM_KVSTORE: u32 = 0xebc18a72;
+    pub const XSO_ABI_CHECKSUM_KVSTORE: u32 = 0x4a4225ac;
     pub const XSO_FINGERPRINT_ALGO_VERSION: u32 = 1;
-    pub const XSO_IR_VERSION: u32 = 1;
+    pub const IR_VERSION: u32 = 1;
 
     // ===== 中间布局：规范桥接载体（两端逐字节一致） =====
     #[repr(C)]
@@ -74,6 +76,17 @@ pub mod kvstore_bridge {
         /// 枚举 -> 边界错误码
         pub fn code(self) -> i32 { self as i32 }
     }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Entry {
+        pub key: u64,
+        pub val: u64,
+    }
+    const _: () = assert!(core::mem::size_of::<Entry>() == LAYOUT_Entry_SIZE);
+    const _: () = assert!(core::mem::align_of::<Entry>() == LAYOUT_Entry_ALIGN);
+    const _: () = assert!(core::mem::offset_of!(Entry, key) == 0);
+    const _: () = assert!(core::mem::offset_of!(Entry, val) == 8);
 
     #[repr(C)]
     #[derive(Clone)]

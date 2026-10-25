@@ -12,16 +12,16 @@ pub mod fs_bridge {
     pub type Result<T, E> = core::result::Result<T, E>;
 
     const LAYOUT_FileStat_SIZE: usize = 24;
-    const LAYOUT_FileStat_ALIGN: usize = 8;
+    const LAYOUT_FileStat_ALIGN: usize = 1;
     const LAYOUT_FsError_SIZE: usize = 4;
     const LAYOUT_FsError_ALIGN: usize = 4;
     const LAYOUT_OpenFlags_SIZE: usize = 4;
     const LAYOUT_OpenFlags_ALIGN: usize = 4;
 
     /// ABI 指纹：布局描述符的 FNV-1a 校验和（应与 anchor 头一致）
-    pub const XSO_ABI_CHECKSUM_FS: u32 = 0xc0fd42b8;
+    pub const XSO_ABI_CHECKSUM_FS: u32 = 0xe8c1efb1;
     pub const XSO_FINGERPRINT_ALGO_VERSION: u32 = 1;
-    pub const XSO_IR_VERSION: u32 = 1;
+    pub const IR_VERSION: u32 = 1;
 
     // ===== 中间布局：规范桥接载体（两端逐字节一致） =====
     // 序列/切片/字符串/集合/关联容器的统一载体：(ptr, len)

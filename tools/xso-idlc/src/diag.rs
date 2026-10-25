@@ -12,7 +12,7 @@ pub struct CompileError {
 impl CompileError {
     pub fn new(msg: impl Into<String>) -> Self {
         Self { message: msg.into(), file: None, line: None, column: None,
-               hint: None, source_line: None }
+               hint: None }
     }
     pub fn at(mut self, line: usize, column: usize) -> Self {
         self.line = Some(line);

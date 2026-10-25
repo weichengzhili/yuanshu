@@ -18,6 +18,7 @@ pub mod rs {
     pub const USE: &str = "use";
     pub const MOD: &str = "mod";
     pub const CORE: &str = "core";
+    pub const ALLOC: &str = "alloc";
     pub const DOC: &str = "///";
     /// 标量与枚举的默认 derive 列表
     pub const DERIVE_POD: [&str; 5] = ["Clone", "Copy", "PartialEq", "Eq", "Debug"];
@@ -57,10 +58,37 @@ pub mod rs {
     pub fn trait_fn(name: &str, params: &str, ret: &str) -> String {
         format!("{} {}({}) -> {};", FN, name, params, ret)
     }
+    /// 函数声明头：`pub const fn name(params) -> ret {`
+    pub fn fn_decl(is_pub: bool, qualifier: &str, name: &str, params: &str, ret: &str) -> String {
+        let vis = if is_pub { format!("{} ", PUB) } else { String::new() };
+        let q = if qualifier.is_empty() { String::new() } else { format!("{} ", qualifier) };
+        format!("{}{}{} {}({}) -> {} {{", vis, q, FN, name, params, ret)
+    }
+    /// 单行函数：`pub const fn name(p) -> r { body }`
+    pub fn fn_one_line(
+        is_pub: bool, qualifier: &str, name: &str, params: &str, ret: &str, body: &str,
+    ) -> String {
+        let vis = if is_pub { format!("{} ", PUB) } else { String::new() };
+        let q = if qualifier.is_empty() { String::new() } else { format!("{} ", qualifier) };
+        format!("{}{}{} {}({}) -> {} {{ {} }}", vis, q, FN, name, params, ret, body)
+    }
+    pub fn match_open(expr: &str) -> String { format!("match {} {{", expr) }
+    pub fn match_arm(pat: &str, body: &str) -> String { format!("{} => {},", pat, body) }
+    pub fn match_wildcard(body: &str) -> String { format!("_ => {},", body) }
+    /// `Some(Self::Variant)`
+    pub fn some_ctor(variant: &str) -> String { format!("Some(Self::{})", variant) }
+    pub fn none() -> String { "None".to_string() }
     pub fn trait_open(name: &str) -> String { format!("{} trait {} {{", PUB, name) }
     pub fn fn_open(name: &str, params: &str, ret: &str) -> String {
         format!("{} {}({}) -> {} {{", FN, name, params, ret)
     }
+    /// 无返回值的函数头：`fn drop(&mut self) {`
+    pub fn fn_decl_void(is_pub: bool, name: &str, params: &str) -> String {
+        let vis = if is_pub { format!("{} ", PUB) } else { String::new() };
+        format!("{}{} {}({}) {{", vis, FN, name, params)
+    }
+    /// 空结构体占位字段类型（MaybeUninit）
+    pub fn maybe_uninit(ty: &str) -> String { format!("{}::mem::MaybeUninit<{}>", CORE, ty) }
 }
 
 /// C++ 侧语法
@@ -132,6 +160,24 @@ pub mod cpp {
     /// 成员方法定义头：`ret name(params) {`
     pub fn method_open(ret: &str, name: &str, params: &str) -> String {
         format!("{} {}({}) {{", ret, name, params)
+    }
+    /// 单行成员方法：`ret name(params) qual { body }`
+    pub fn method_one_line(
+        ret: &str, name: &str, params: &str, qual: &str, body: &str,
+    ) -> String {
+        format!("{} {}({}) {} {{ {} }}", ret, name, params, qual, body)
+    }
+    /// 函数指针成员：`void (*drop)(T*);`
+    pub fn fn_ptr_member(ret: &str, name: &str, params: &str) -> String {
+        format!("{} (*{})({});", ret, name, params)
+    }
+    /// 删除的函数：`X(const X&) = delete;`
+    pub fn deleted(decl: &str) -> String { format!("{} = delete;", decl) }
+    /// 析构函数体：`~X() { body }`
+    pub fn dtor_body(name: &str, body: &str) -> String { format!("~{}() {{ {} }}", name, body) }
+    /// 显式 bool 转换：`explicit operator bool() const noexcept { body }`
+    pub fn explicit_bool(body: &str) -> String {
+        format!("explicit operator bool() const noexcept {{ {} }}", body)
     }
     pub fn switch_open(expr: &str) -> String { format!("switch ({}) {{", expr) }
     pub fn case(pat: &str, body: &str) -> String { format!("case {}: {};", pat, body) }

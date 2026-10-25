@@ -23,8 +23,8 @@ mod tests {
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "unexpected parse errors: {:?}",
                 errs.iter().map(|e| e.to_string()).collect::<Vec<_>>());
-        let m = m.expect("module should parse");
-        semantic::analyze(&m).expect("semantic analysis should pass");
+        let mut m = m.expect("module should parse");
+        semantic::analyze(&mut m).expect("semantic analysis should pass");
         BridgeIr::build(&m)
     }
 
@@ -35,7 +35,7 @@ mod tests {
         let src = "@module(c)\n@version(1)\nstruct A { b: B }\nstruct B { a: A }\n";
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
-        let r = semantic::analyze(&m.expect("module"));
+        let r = semantic::analyze(&mut m.expect("module"));
         assert!(r.is_err(), "cycle should be rejected");
         assert!(r.unwrap_err().to_string().contains("cyclic"));
     }
@@ -47,7 +47,7 @@ mod tests {
         let (m, errs) = parser::parse_with_recovery(src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
         // 语义应通过（无按值环）
-        let _ = semantic::analyze(&m.expect("module"));
+        let _ = semantic::analyze(&mut m.expect("module"));
     }
 
     #[test]
@@ -57,7 +57,7 @@ mod tests {
         let src = format!("@module(d)\n@version(1)\nstruct S {{ f: {} }}\n", ty);
         let (m, errs) = parser::parse_with_recovery(&src);
         assert!(errs.is_empty(), "parse: {:?}", errs);
-        let r = semantic::analyze(&m.expect("module"));
+        let r = semantic::analyze(&mut m.expect("module"));
         assert!(r.is_err(), "deep nesting should be rejected");
         assert!(r.unwrap_err().to_string().contains("nesting"));
     }
@@ -66,12 +66,12 @@ mod tests {
     fn rejects_duplicate_field_and_zero_error_code() {
         let dup = "@module(x)\n@version(1)\nstruct S { a: u32, a: u8 }\n";
         let (m, _) = parser::parse_with_recovery(dup);
-        let r = semantic::analyze(&m.expect("module"));
+        let r = semantic::analyze(&mut m.expect("module"));
         assert!(r.is_err() && r.unwrap_err().to_string().contains("duplicate field"));
 
         let zero = "@module(y)\n@version(1)\nerror E : i32 { A = 0 }\n";
         let (m, _) = parser::parse_with_recovery(zero);
-        let r = semantic::analyze(&m.expect("module"));
+        let r = semantic::analyze(&mut m.expect("module"));
         assert!(r.is_err(), "error code 0 must be rejected");
     }
 
@@ -148,7 +148,7 @@ mod tests {
             let cpp = codegen::cpp::generate(&ir);
 
             for (name, l) in &ir.type_layouts {
-                assert!(anchor.contains(&format!("XSO_LAYOUT_{}_SIZE  {}", name, l.size)),
+                assert!(anchor.contains(&format!("XSO_LAYOUT_{}_SIZE {}", name, l.size)),
                         "anchor missing size for {}", name);
                 assert!(anchor.contains(&format!("XSO_LAYOUT_{}_ALIGN {}", name, l.align)),
                         "anchor missing align for {}", name);
@@ -196,7 +196,7 @@ mod tests {
         } else {
             if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
             std::fs::write(&p, content).expect("write golden");
-            eprintln!("[snapshot] bootstrap wrote {}", p.display());
+            crate::log!("[snapshot] bootstrap wrote {}", p.display());
         }
     }
 
@@ -237,7 +237,7 @@ mod tests {
                 s.push(alphabet[(rng.next() as usize) % alphabet.len()] as char);
             }
             let (m, _errs) = parser::parse_with_recovery(&s);
-            if let Some(m) = m { let _ = semantic::analyze(&m); }
+            if let Some(mut m) = m { let _ = semantic::analyze(&mut m); }
         }
 
         // 对合法输入做字节级变异
@@ -247,8 +247,8 @@ mod tests {
             let c = alphabet[(rng.next() as usize) % alphabet.len()] as char;
             s.replace_range(pos..=pos, &c.to_string());
             let (m, _errs) = parser::parse_with_recovery(&s);
-            if let Some(m) = m {
-                let _ = semantic::analyze(&m);
+            if let Some(mut m) = m {
+                let _ = semantic::analyze(&mut m);
                 let ir = BridgeIr::build(&m);
                 let _ = codegen::rust::generate(&ir);
                 let _ = codegen::cpp::generate(&ir);

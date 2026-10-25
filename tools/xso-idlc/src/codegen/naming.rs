@@ -4,6 +4,9 @@
 //! 禁止在生成逻辑里散落硬编码字符串，便于统一改名与主题化定制。
 
 // ===== C++ 侧：内核提供的易用容器/类型 =====
+/// 生成代码中 IR 版本常量的标识符名（如 `constexpr uint32_t IR_VERSION = ...`）
+pub const IR_VERSION: &str = "IR_VERSION";
+
 pub const CXX_VECTOR: &str = "xso::Vector";
 pub const CXX_OPTIONAL: &str = "xso::Optional";
 pub const CXX_UNIQUE_PTR: &str = "xso::UniquePtr";

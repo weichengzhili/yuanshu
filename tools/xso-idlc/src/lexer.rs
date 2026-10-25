@@ -75,7 +75,7 @@ impl<'a> Lexer<'a> {
         let col = self.col;
         let c = self.peek().unwrap();
 
-        if c.is_ascii_alphabetic() || c == b'_' {
+        if self.peek_is_ident_start() {
             let id = self.read_ident();
             let kind = match id.as_str() {
                 "module" => TokenKind::KwModule,
@@ -131,11 +131,33 @@ impl<'a> Lexer<'a> {
         Ok(Token { kind, line, col })
     }
 
+    /// 标识符起点：ASCII 字母/下划线，或任意 Unicode XID 起始字符（支持中文等）
+    fn peek_is_ident_start(&self) -> bool {
+        match std::str::from_utf8(&self.src[self.pos..]) {
+            Ok(s) => match s.chars().next() {
+                Some(c) => c == '_' || c.is_alphabetic(),
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
     fn read_ident(&mut self) -> String {
         let start = self.pos;
-        while self.peek().map_or(false, |c| c.is_ascii_alphanumeric() || c == b'_') {
-            self.advance();
+        let rest = match std::str::from_utf8(&self.src[self.pos..]) {
+            Ok(r) => r,
+            Err(_) => return String::new(),
+        };
+        let mut consumed = 0usize;
+        for (i, ch) in rest.char_indices() {
+            if i == 0 {
+                if !(ch == '_' || ch.is_alphabetic()) { break; }
+            } else if !(ch == '_' || ch.is_alphanumeric()) {
+                break;
+            }
+            consumed = i + ch.len_utf8();
         }
+        while self.pos < start + consumed { self.advance(); }
         String::from_utf8_lossy(&self.src[start..self.pos]).to_string()
     }
 

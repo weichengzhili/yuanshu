@@ -72,7 +72,17 @@ pub fn check_all(module: &Module) -> Result<()> {
                     }
                 }
             }
-            Item::Enum(e) | Item::Error(e) => {
+            Item::Enum(e) => {
+                let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+                for v in &e.variants {
+                    check_ident(&v.name)?;
+                    if seen.insert(v.name.as_str(), ()).is_some() {
+                        return Err(CompileError::new(format!(
+                            "duplicate variant '{}' in '{}'", v.name, e.name)));
+                    }
+                }
+            }
+            Item::Error(e) => {
                 let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
                 for v in &e.variants {
                     check_ident(&v.name)?;
@@ -227,6 +237,9 @@ fn check_type(ty: &TypeRef, defined: &[&str], ctx_type: &str, ctx_member: &str, 
         TypeRef::Result(ok, err) => {
             check_type(ok, defined, ctx_type, ctx_member, next)?;
             check_type(err, defined, ctx_type, ctx_member, next)?;
+        }
+        TypeRef::App { args, .. } => {
+            for a in args { check_type(a, defined, ctx_type, ctx_member, next)?; }
         }
     }
     Ok(())

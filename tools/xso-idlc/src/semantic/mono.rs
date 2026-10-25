@@ -7,8 +7,6 @@
 //!
 //! 支持嵌套泛型（如 `struct A<T> { b: B<T> }`）：采用有界不动点迭代展开。
 
-fn instances_done() -> usize { 0 }
-
 use crate::ast::*;
 use crate::diag::{CompileError, Result};
 use std::collections::BTreeMap;
@@ -49,11 +47,9 @@ pub fn monomorphize(module: &mut Module) -> Result<()> {
         }
 
         // 2) 为本轮新增实例生成具体结构体（其内部若还有泛型，下一轮继续展开）
+        let start = instances.len();
         let newly = instances[start..].to_vec();
-        let new: Vec<(String, String, Vec<TypeRef>)> = instances.iter().skip(instances_done()).cloned().collect();
-        let _ = &mut new;
-        if new.is_empty() { break; }
-        let start = instances.len() - new.len();
+        if newly.is_empty() { break; }
         for (mangled, tname, args) in newly {
             let tpl = generics.iter().find(|g| g.name == tname)
                 .ok_or_else(|| CompileError::new(format!("unknown generic '{}'", tname)))?;

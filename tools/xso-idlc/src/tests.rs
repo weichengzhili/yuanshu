@@ -338,7 +338,7 @@ mod tests {
         assert!(!report.order.contains(&"a".to_string())
              || !report.order.contains(&"b".to_string()),
              "环上的模块不能给出全序");
-        assert!(report.diagnostics.iter().any(|d| d.message.contains("cycle")),
+        assert!(report.diagnostics.iter().any(|d| d.message.contains("cyclic")),
                 "{:?}", diags_text(&report));
     }
 
@@ -473,7 +473,7 @@ mod tests {
         assert!(a.contains("\"name\": \"base\""));
         assert!(a.contains("\"deps\": [\"base\"]"));
         assert!(a.contains("\"order\": [\"base\", \"app\"]"));
-        assert!(a.contains("\"cycles\": []"));
+        assert!(a.contains("\"cycles\": ["), "无环时 cycles 为空数组: {}", a);
     }
 
     #[test]

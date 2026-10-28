@@ -49,6 +49,10 @@ fn main() -> ExitCode {
 pub fn run(args: &[String]) -> diag::Result<()> {
     if args.len() <= 1 { return interactive::run_interactive(); }
 
+    // 子命令形态 `xso-idlc <cmd> [options]`（含 `help <cmd>`）：交给 cli 统一解析，
+    // 由 cli 转译为旧式 argv 后回到本函数；以 `-` 开头的才是本函数的纯 flag 形态。
+    if !args[1].starts_with('-') { return cli::dispatch(&args); }
+
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut anchor_out = None;
     let mut cpp_out = None;

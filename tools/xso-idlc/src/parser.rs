@@ -219,7 +219,12 @@ impl Parser {
             let (l, c) = { let t = self.peek_tok(); (t.line, t.col) };
             let s = self.expect_ident_or_kw()?;
             segs.push((s, l, c));
-            if self.check(&TokenKind::ColonColon) { self.advance(); continue; }
+            if self.check(&TokenKind::ColonColon) {
+                self.advance();
+                // `use a::{B, C};` —— `::` 后面是花括号列表，路径到此为止
+                if self.check(&TokenKind::LBrace) { break; }
+                continue;
+            }
             break;
         }
 

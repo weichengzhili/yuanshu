@@ -34,7 +34,10 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Self { src: src.as_bytes(), pos: 0, line: 1, col: 1 }
+        // 容忍 UTF-8 BOM（Windows 编辑器常见）：跳过前导 EF BB BF，避免误报 "unexpected char"
+        let bytes = src.as_bytes();
+        let start = if bytes.len() >= 3 && bytes[..3] == [0xEF, 0xBB, 0xBF] { 3 } else { 0 };
+        Self { src: bytes, pos: start, line: 1, col: 1 }
     }
 
     pub fn tokenize(mut self) -> Result<Vec<Token>> {

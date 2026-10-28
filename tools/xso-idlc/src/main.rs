@@ -6,6 +6,7 @@ pub mod diag;
 pub mod lexer;
 pub mod parser;
 pub mod semantic;
+pub mod deps;
 pub mod cli;
 pub mod interactive;
 pub mod migrate;
@@ -57,6 +58,8 @@ pub fn run(args: &[String]) -> diag::Result<()> {
     let mut emit_ir: Option<PathBuf> = None;
     let mut sbom_out: Option<PathBuf> = None;
     let mut cache_dir = PathBuf::from(".xso-cache");
+    // 多文件依赖的模块搜索目录（--include-dir，可重复）
+    let mut include_dirs: Vec<PathBuf> = Vec::new();
     let mut check_only = false;
     let mut migrate_path: Option<PathBuf> = None;
     let mut interactive_flag = false;
@@ -76,6 +79,7 @@ pub fn run(args: &[String]) -> diag::Result<()> {
             "--emit-ir"  => { emit_ir    = Some(PathBuf::from(&args[i + 1])); i += 2; }
             "--sbom"     => { sbom_out   = Some(PathBuf::from(&args[i + 1])); i += 2; }
             "--cache-dir"=> { cache_dir  = PathBuf::from(&args[i + 1]); i += 2; }
+            "--include-dir" => { include_dirs.push(PathBuf::from(&args[i + 1])); i += 2; }
             "--jobs"     => {
                 if let Ok(n) = args[i + 1].parse::<usize>() { jobs = n.max(1); }
                 i += 2;
@@ -98,8 +102,38 @@ pub fn run(args: &[String]) -> diag::Result<()> {
         return run_migrate(p);
     }
 
+    // ===== 多文件依赖校验（工程级门禁）=====
+    // 多个输入构成一个工程：先解析并校验跨文件依赖（模块解析 / 符号存在 /
+    // 自我导入 / 重复导入 / 依赖环 / 重复模块名），任一错误即中止构建；
+    // 通过后得到每个输入需要内联的外部定义与依赖签名。
+    let (linked, signatures) = if inputs.len() > 1 {
+        let report = deps::analyze(&inputs, &deps::Options {
+            strict: false,
+            include_dirs: include_dirs.clone(),
+        });
+        for dg in &report.diagnostics {
+            match dg.severity {
+                deps::Severity::Error => crate::error!("{}", dg.render()),
+                deps::Severity::Warning => crate::warn!("{}", dg.render()),
+            }
+        }
+        if report.has_errors() {
+            return Err(diag::CompileError::new(format!(
+                "multi-file dependency check failed: {} error(s) (see above)",
+                report.errors())));
+        }
+        crate::progress!("dependency check OK: {} module(s), build order: {}",
+            report.modules.len(),
+            if report.order.is_empty() { "(none)".to_string() } else { report.order.join(" -> ") });
+        (report.linked, report.signatures)
+    } else {
+        (std::collections::BTreeMap::new(), std::collections::BTreeMap::new())
+    };
+
     let multi = inputs.len() > 1;
     let errors: Mutex<Vec<diag::CompileError>> = Mutex::new(Vec::new());
+    let lnk = &linked;
+    let sig = &signatures;
 
     // 跨输入并行构建：按 --jobs 上限分桶
     std::thread::scope(|s| {
@@ -115,7 +149,8 @@ pub fn run(args: &[String]) -> diag::Result<()> {
             let cd = &cache_dir;
             s.spawn(move || {
                 for input in chunk {
-                    process_input(input, multi, a, c, r, d, t, e, s2, cd, check_only, no_cache, errors);
+                    process_input(input, multi, a, c, r, d, t, e, s2, cd,
+                                  check_only, no_cache, lnk, sig, errors);
                 }
             });
         }
@@ -144,9 +179,14 @@ fn process_input(
     cache_dir: &PathBuf,
     check_only: bool,
     no_cache: bool,
+    // 多文件链接结果：每个输入需要从被导入模块内联进来的定义
+    linked: &std::collections::BTreeMap<PathBuf, Vec<crate::ast::Item>>,
+    // 多文件依赖签名：依赖内容变化要让增量缓存失效
+    signatures: &std::collections::BTreeMap<PathBuf, u64>,
     errors: &Mutex<Vec<diag::CompileError>>,
 ) {
-    let (ir_opt, perrs) = parse_and_check(input);
+    let deps_hash = signatures.get(input).copied().unwrap_or(0);
+    let (ir_opt, perrs) = parse_and_check(input, linked);
     if !perrs.is_empty() { errors.lock().unwrap().extend(perrs); }
     let ir = match ir_opt {
         Some(ir) => Arc::new(ir),
@@ -159,8 +199,9 @@ fn process_input(
 
     let jobs = collect_jobs(input, multi, anchor_out, cpp_out, rust_out, doc_out, test_out);
 
-    // 增量缓存：输入哈希 + 版本一致且产物齐全 -> 整轮跳过（check 模式与 --no-cache 不查缓存）
-    if !check_only && !no_cache && cache_hit(input, &ir, &jobs, cache_dir) {
+    // 增量缓存：输入哈希 + 依赖签名 + 版本一致且产物齐全 -> 整轮跳过
+    // （check 模式与 --no-cache 不查缓存）
+    if !check_only && !no_cache && cache_hit(input, &ir, &jobs, cache_dir, deps_hash) {
         crate::progress!("cache hit, skipping generation for {}", input.display());
         return;
     }
@@ -234,12 +275,15 @@ fn process_input(
         if let Err(e) = emit_ir_file(p, &ir) { errors.lock().unwrap().push(e); }
     }
 
-    if !check_only && !no_cache { write_cache(input, &ir, &jobs, cache_dir); }
+    if !check_only && !no_cache { write_cache(input, &ir, &jobs, cache_dir, deps_hash); }
 }
 
 /// 解析 + 语义检查 + 构建 Bridge IR。
 /// 带回退恢复：一次收集全部语法/语义错误，每条都带文件、行列与源码片段。
-fn parse_and_check(input: &PathBuf) -> (Option<bridge_ir::BridgeIr>, Vec<diag::CompileError>) {
+fn parse_and_check(
+    input: &PathBuf,
+    linked: &std::collections::BTreeMap<PathBuf, Vec<crate::ast::Item>>,
+) -> (Option<bridge_ir::BridgeIr>, Vec<diag::CompileError>) {
     let mut errs: Vec<diag::CompileError> = Vec::new();
     let src = match fs::read_to_string(input) {
         Ok(s) => s,
@@ -257,6 +301,11 @@ fn parse_and_check(input: &PathBuf) -> (Option<bridge_ir::BridgeIr>, Vec<diag::C
     }
 
     let mut module = match module_opt { Some(m) => m, None => return (None, errs) };
+    // 多文件链接：把 `use` 导入的符号（含其传递依赖）内联进本模块，
+    // 使每个模块的产物自包含（布局算法一致 ⇒ 两端 ABI 仍一致）。
+    if let Some(extra) = linked.get(input) {
+        if !extra.is_empty() { module.items.extend(extra.iter().cloned()); }
+    }
     match semantic::analyze(&mut module) {
         Ok(()) => {}
         Err(e) => { errs.push(e.in_file(input.display().to_string())); return (None, errs); }
@@ -405,22 +454,32 @@ fn cache_path(dir: &Path, module: &str) -> PathBuf {
     dir.join(format!("{}.cache", module))
 }
 
-fn cache_hit(input: &Path, ir: &bridge_ir::BridgeIr, jobs: &[(Out, PathBuf)], dir: &Path) -> bool {
+fn cache_hit(
+    input: &Path,
+    ir: &bridge_ir::BridgeIr,
+    jobs: &[(Out, PathBuf)],
+    dir: &Path,
+    // 依赖签名：依赖文件内容变化时必须失效（跨文件依赖）
+    deps_hash: u64,
+) -> bool {
     let p = cache_path(dir, &ir.module.name);
     let Ok(text) = fs::read_to_string(&p) else { return false; };
     let mut in_hash = None;
     let mut ir_v = None;
     let mut gen_v = None;
+    let mut dep_h: Option<String> = None;
     let mut outs: Vec<String> = Vec::new();
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("input_hash=") { in_hash = Some(v.to_string()); }
         else if let Some(v) = line.strip_prefix("ir_version=") { ir_v = Some(v.to_string()); }
         else if let Some(v) = line.strip_prefix("gen_version=") { gen_v = Some(v.to_string()); }
+        else if let Some(v) = line.strip_prefix("deps_hash=") { dep_h = Some(v.to_string()); }
         else if let Some(v) = line.strip_prefix("out=") { outs.push(v.to_string()); }
     }
     let Ok(src) = fs::read_to_string(input) else { return false; };
     let want = format!("{:016x}", fnv1a(&src));
     if in_hash.as_deref() != Some(want.as_str()) { return false; }
+    if dep_h.as_deref() != Some(format!("{:016x}", deps_hash).as_str()) { return false; }
     if ir_v.as_deref() != Some(format!("{}", ir.ir_version).as_str()) { return false; }
     if gen_v.as_deref() != Some(GEN_VERSION) { return false; }
     let cur: Vec<String> = jobs.iter().map(|(_, p)| p.display().to_string()).collect();
@@ -428,18 +487,25 @@ fn cache_hit(input: &Path, ir: &bridge_ir::BridgeIr, jobs: &[(Out, PathBuf)], di
     outs.iter().all(|o| Path::new(o).exists())
 }
 
-fn write_cache(input: &Path, ir: &bridge_ir::BridgeIr, jobs: &[(Out, PathBuf)], dir: &Path) {
+fn write_cache(
+    input: &Path,
+    ir: &bridge_ir::BridgeIr,
+    jobs: &[(Out, PathBuf)],
+    dir: &Path,
+    deps_hash: u64,
+) {
     let Ok(src) = fs::read_to_string(input) else { return; };
     let _ = fs::create_dir_all(dir);
     let mut s = String::new();
     s.push_str(&format!("input_hash={:016x}\n", fnv1a(&src)));
+    s.push_str(&format!("deps_hash={:016x}\n", deps_hash));
     s.push_str(&format!("ir_version={}\n", ir.ir_version));
     s.push_str(&format!("gen_version={}\n", GEN_VERSION));
     for (_, p) in jobs { s.push_str(&format!("out={}\n", p.display())); }
     let _ = fs::write(cache_path(dir, &ir.module.name), s);
 }
 
-fn fnv1a(s: &str) -> u64 {
+pub fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         h ^= *b as u64;

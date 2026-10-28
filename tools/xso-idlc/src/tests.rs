@@ -222,6 +222,275 @@ mod tests {
         }
     }
 
+    // ===================== 多文件依赖校验 =====================
+
+    /// 建一个临时工程目录（并行测试互不干扰：目录名按 tag 区分）
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("xso-idlc-test-{}", tag));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("create temp dir");
+        p
+    }
+
+    fn put(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).expect("write idl");
+    }
+
+    fn project(tag: &str, files: &[(&str, &str)]) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+        let dir = tmp_dir(tag);
+        let mut paths = Vec::new();
+        for (name, content) in files {
+            let p = dir.join(name);
+            put(&p, content);
+            paths.push(p);
+        }
+        (dir, paths)
+    }
+
+    fn diags_text(r: &crate::deps::Report) -> Vec<String> {
+        r.diagnostics.iter().map(|d| d.render()).collect()
+    }
+
+    const BASE_XSO: &str = "@module(base)\n@version(1)\n\
+        enum Color : u32 { Red = 1, Green = 2 }\n\
+        struct Point { x: i32, y: i32 }\n";
+
+    #[test]
+    fn use_declarations_are_parsed_into_imports() {
+        let src = "@module(app)\n@version(2)\n\
+            use base;\n\
+            use base::{Point, Color};\n\
+            use base::Point as P;\n\
+            struct Rect { a: Point }\n";
+        let (m, errs) = parser::parse_with_recovery(src);
+        assert!(errs.is_empty(), "parse: {:?}", errs);
+        let m = m.expect("module");
+        assert_eq!(m.imports.len(), 3, "{:#?}", m.imports);
+        assert_eq!(m.imports[0].module_name(), "base");
+        assert!(m.imports[0].is_glob(), "整模块导入");
+        assert_eq!(m.imports[1].module_name(), "base");
+        assert_eq!(
+            m.imports[1].names.iter().map(|n| n.name.clone()).collect::<Vec<_>>(),
+            vec!["Point".to_string(), "Color".to_string()]);
+        assert_eq!(m.imports[2].names[0].local(), "P", "as 别名生效");
+        // 导入声明不进入条目列表
+        assert_eq!(m.items.len(), 1);
+    }
+
+    #[test]
+    fn multi_file_project_resolves_and_links_imports() {
+        let (_dir, paths) = project("link", &[
+            ("base.xso", BASE_XSO),
+            ("app.xso", "@module(app)\n@version(3)\nuse base::Point;\n\
+                struct Rect { a: Point, b: Point }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.warnings(), 0, "{:?}", diags_text(&report));
+        // 依赖先于依赖方
+        assert_eq!(report.order, vec!["base".to_string(), "app".to_string()]);
+        assert_eq!(report.edges, vec![("app".to_string(), "base".to_string())]);
+        assert!(report.cycles.is_empty());
+        // 链接：base::Point 被克隆进 app
+        let app_items = report.linked.get(&paths[1]).expect("app linked");
+        assert!(app_items.iter().any(|it| it.name() == "Point"), "{:#?}", app_items);
+        // 依赖方（base）没有外部依赖，不需内联
+        let base_items = report.linked.get(&paths[0]).expect("base linked");
+        assert!(base_items.is_empty());
+    }
+
+    #[test]
+    fn multi_file_unknown_module_is_reported() {
+        let (_dir, paths) = project("unknown-mod", &[
+            ("app.xso", "@module(app)\n@version(1)\nuse missing::Thing;\n\
+                struct S { t: Thing }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 1, "{:?}", diags_text(&report));
+        let d = &report.diagnostics[0];
+        assert!(d.message.contains("unknown module 'missing'"), "{}", d.message);
+        assert_eq!(d.line, Some(3), "定位到 use 所在行");
+    }
+
+    #[test]
+    fn multi_file_unknown_symbol_is_reported() {
+        let (_dir, paths) = project("unknown-sym", &[
+            ("base.xso", BASE_XSO),
+            ("app.xso", "@module(app)\n@version(1)\n\
+                use base::{Point, Nope};\nstruct S { p: Point }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 1, "{:?}", diags_text(&report));
+        let d = &report.diagnostics[0];
+        assert!(d.message.contains("does not export symbol 'Nope'"), "{}", d.message);
+        assert!(d.hint.as_deref().unwrap_or("").contains("Point"), "hint 列出可用符号");
+    }
+
+    #[test]
+    fn multi_file_import_cycle_is_reported() {
+        let (_dir, paths) = project("cycle", &[
+            ("a.xso", "@module(a)\n@version(1)\nuse b::B;\nstruct A { b: B }\n"),
+            ("b.xso", "@module(b)\n@version(1)\nuse a::A;\nstruct B { a: A }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert!(report.errors() >= 1, "{:?}", diags_text(&report));
+        assert!(!report.cycles.is_empty(), "检测到环");
+        assert!(!report.order.contains(&"a".to_string())
+             || !report.order.contains(&"b".to_string()),
+             "环上的模块不能给出全序");
+        assert!(report.diagnostics.iter().any(|d| d.message.contains("cycle")),
+                "{:?}", diags_text(&report));
+    }
+
+    #[test]
+    fn multi_file_self_import_is_reported() {
+        let (_dir, paths) = project("self-import", &[
+            ("app.xso", "@module(app)\n@version(1)\nuse app::A;\nstruct A { x: u32 }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 1, "{:?}", diags_text(&report));
+        assert!(report.diagnostics[0].message.contains("imports itself"));
+    }
+
+    #[test]
+    fn multi_file_duplicate_module_name_is_reported() {
+        let (_dir, paths) = project("dup-module", &[
+            ("one.xso", "@module(dup)\n@version(1)\nstruct A { x: u32 }\n"),
+            ("two.xso", "@module(dup)\n@version(1)\nstruct B { y: u32 }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 1, "{:?}", diags_text(&report));
+        assert!(report.diagnostics[0].message.contains("duplicate module name 'dup'"));
+    }
+
+    #[test]
+    fn multi_file_unused_import_is_warned() {
+        let (_dir, paths) = project("unused", &[
+            ("base.xso", BASE_XSO),
+            ("app.xso", "@module(app)\n@version(1)\nuse base::Point;\n\
+                struct S { x: u32 }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.warnings(), 1, "{:?}", diags_text(&report));
+        assert!(report.diagnostics[0].message.contains("unused import"));
+        // 严格模式下警告即失败
+        assert!(report.is_fatal(true));
+        assert!(!report.is_fatal(false));
+    }
+
+    #[test]
+    fn multi_file_transitive_dependency_is_linked() {
+        // app -> mid -> base：mid::Wrapper 字段引用 base::Point，
+        // app 只导入 mid::Wrapper，Point 也应被传递内联进来
+        let (_dir, paths) = project("transitive", &[
+            ("base.xso", BASE_XSO),
+            ("mid.xso", "@module(mid)\n@version(1)\nuse base::Point;\n\
+                struct Wrapper { p: Point, tag: u32 }\n"),
+            ("app.xso", "@module(app)\n@version(1)\nuse mid::Wrapper;\n\
+                struct Holder { w: Wrapper }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.warnings(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.order,
+            vec!["base".to_string(), "mid".to_string(), "app".to_string()]);
+        let items = report.linked.get(&paths[2]).expect("app linked");
+        let names: Vec<&str> = items.iter().map(|it| it.name()).collect();
+        assert!(names.contains(&"Wrapper"), "{:?}", names);
+        assert!(names.contains(&"Point"), "传递依赖也被内联: {:?}", names);
+    }
+
+    #[test]
+    fn multi_file_missing_module_is_discovered_in_include_dir() {
+        let dir = tmp_dir("discover");
+        let idl = dir.join("idl");
+        std::fs::create_dir_all(&idl).expect("mkdir idl");
+        put(&idl.join("base.xso"), BASE_XSO);
+        let app = dir.join("app.xso");
+        put(&app, "@module(app)\n@version(1)\nuse base::Point;\n\
+            struct Rect { a: Point }\n");
+        // 只给出 app，base 需要从 include 目录发现
+        let report = crate::deps::analyze(&[app], &crate::deps::Options {
+            strict: false,
+            include_dirs: vec![idl],
+        });
+        assert_eq!(report.errors(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.modules.len(), 2, "base 被自动发现");
+        assert_eq!(report.order, vec!["base".to_string(), "app".to_string()]);
+    }
+
+    #[test]
+    fn multi_file_gen_inlines_imported_types() {
+        let dir = tmp_dir("gen");
+        let base = dir.join("base.xso");
+        let app = dir.join("app.xso");
+        put(&base, BASE_XSO);
+        put(&app, "@module(app)\n@version(1)\nuse base::Point;\n\
+            struct Rect { a: Point, b: Point }\n");
+        let cache = dir.join("cache");
+        let argv: Vec<String> = vec![
+            "xso-idlc".into(),
+            "--input".into(), app.display().to_string(),
+            "--input".into(), base.display().to_string(),
+            "--cache-dir".into(), cache.display().to_string(),
+        ];
+        crate::run(&argv).expect("multi-file generation should succeed");
+
+        let code = std::fs::read_to_string(dir.join("app.rs")).expect("app.rs");
+        assert!(code.contains("struct Rect"), "本地定义");
+        assert!(code.contains("struct Point"), "导入的定义被内联进本模块");
+        assert!(code.contains("a: Point"), "字段类型可见");
+    }
+
+    #[test]
+    fn multi_file_broken_dependency_fails_generation() {
+        let dir = tmp_dir("broken");
+        let app = dir.join("app.xso");
+        put(&app, "@module(app)\n@version(1)\nuse ghost::Thing;\n\
+            struct S { t: Thing }\n");
+        let argv: Vec<String> = vec![
+            "xso-idlc".into(),
+            "--input".into(), app.display().to_string(),
+            "--input".into(), dir.join("ghost.xso").display().to_string(),
+            "--cache-dir".into(), dir.join("cache").display().to_string(),
+        ];
+        let err = crate::run(&argv).expect_err("broken dependency must fail");
+        assert!(err.to_string().contains("dependency"), "{}", err);
+    }
+
+    #[test]
+    fn multi_file_deps_json_is_deterministic() {
+        let (_dir, paths) = project("json", &[
+            ("base.xso", BASE_XSO),
+            ("app.xso", "@module(app)\n@version(2)\nuse base::{Point, Color};\n\
+                struct Rect { a: Point, c: Color }\n"),
+        ]);
+        let opts = crate::deps::Options::default();
+        let a = crate::deps::analyze(&paths, &opts).to_json();
+        let b = crate::deps::analyze(&paths, &opts).to_json();
+        assert_eq!(a, b, "依赖图 JSON 必须确定");
+        assert!(a.contains("\"name\": \"base\""));
+        assert!(a.contains("\"deps\": [\"base\"]"));
+        assert!(a.contains("\"order\": [\"base\", \"app\"]"));
+        assert!(a.contains("\"cycles\": []"));
+    }
+
+    #[test]
+    fn multi_file_glob_import_links_whole_module() {
+        let (_dir, paths) = project("glob", &[
+            ("base.xso", BASE_XSO),
+            ("app.xso", "@module(app)\n@version(1)\nuse base;\n\
+                struct Pair { a: Point, c: Color }\n"),
+        ]);
+        let report = crate::deps::analyze(&paths, &crate::deps::Options::default());
+        assert_eq!(report.errors(), 0, "{:?}", diags_text(&report));
+        assert_eq!(report.warnings(), 0, "{:?}", diags_text(&report));
+        let items = report.linked.get(&paths[1]).expect("app linked");
+        let names: Vec<&str> = items.iter().map(|it| it.name()).collect();
+        assert!(names.contains(&"Point") && names.contains(&"Color"), "{:?}", names);
+    }
+
     #[test]
     fn fuzz_never_panics() {
         let mut rng = Rng(0x2545F4914F6CDD1D);

@@ -321,7 +321,9 @@ pub fn decode_bin(bytes: &[u8]) -> std::result::Result<BridgeIr, String> {
 
     let mut ir = BridgeIr {
         ir_version,
-        module: crate::ast::Module { name, version: module_version, items: Vec::new() },
+        module: crate::ast::Module {
+            name, version: module_version, items: Vec::new(), imports: Vec::new(),
+        },
         type_layouts: BTreeMap::new(),
         field_offsets: BTreeMap::new(),
         enum_sizes: BTreeMap::new(),

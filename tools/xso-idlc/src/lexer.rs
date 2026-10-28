@@ -4,7 +4,7 @@ use crate::diag::{CompileError, Result};
 pub enum TokenKind {
     // 声明关键字
     KwModule, KwVersion, KwEnum, KwError, KwStruct, KwInterface,
-    KwType, KwConst, KwUse,
+    KwType, KwConst, KwUse, KwAs,
     // 注解关键字
     KwAvailable, KwAdded, KwRemoved, KwField, KwMethod,
     // 边界控制关键字
@@ -12,7 +12,7 @@ pub enum TokenKind {
     Ident(String),
     Int(i64),
     Str(String),
-    At, Colon, Semicolon, Comma, Equals,
+    At, Colon, ColonColon, Semicolon, Comma, Equals,
     LBrace, RBrace, LParen, RParen,
     LBracket, RBracket, Lt, Gt, Arrow,
     Eof,
@@ -87,6 +87,7 @@ impl<'a> Lexer<'a> {
                 "type" => TokenKind::KwType,
                 "const" => TokenKind::KwConst,
                 "use" => TokenKind::KwUse,
+                "as" => TokenKind::KwAs,
                 "available" => TokenKind::KwAvailable,
                 "added" => TokenKind::KwAdded,
                 "removed" => TokenKind::KwRemoved,
@@ -113,6 +114,7 @@ impl<'a> Lexer<'a> {
         self.advance();
         let kind = match c {
             b'@' => TokenKind::At,
+            b':' if self.peek() == Some(b':') => { self.advance(); TokenKind::ColonColon }
             b':' => TokenKind::Colon,
             b';' => TokenKind::Semicolon,
             b',' => TokenKind::Comma,

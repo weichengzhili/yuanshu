@@ -41,6 +41,7 @@ pub fn run_interactive() -> Result<()> {
             "generate" | "gen" | "g" => { if run_cmd(do_generate) { break; } continue; }
             "check" | "k" => { if run_cmd(do_check) { break; } continue; }
             "ir" | "i" => { if run_cmd(do_ir) { break; } continue; }
+            "deps" | "d" => { if run_cmd(do_deps) { break; } continue; }
             "migrate" | "mig" | "m" => { if run_cmd(do_migrate) { break; } continue; }
             "sbom" | "s" => { if run_cmd(do_sbom) { break; } continue; }
             "interactive" | "ui" => { crate::out!("already in interactive mode."); continue; }
@@ -57,6 +58,7 @@ fn print_interactive_help() {
     crate::out!("  generate (gen, g)   生成 Rust / C++ / anchor 代码、文档与测试桩");
     crate::out!("  check    (k)        仅校验 IDL 语法与语义，不生成任何文件");
     crate::out!("  ir       (i)        查看中间表示 (IR)、共享结构体布局与 ABI 指纹");
+    crate::out!("  deps     (d)        多文件依赖校验（模块图 / 符号解析 / 环 / 构建顺序）");
     crate::out!("  migrate  (mig, m)    迁移旧版 IDL 语法到当前版本（支持原地覆盖）");
     crate::out!("  sbom     (s)        生成 SBOM（软件物料清单 JSON）");
     crate::out!("  help     (?, h)      显示本帮助");
@@ -166,6 +168,18 @@ fn do_ir() -> Result<()> {
     crate::out!("  枚举/错误   : {} 个", ir.enum_sizes.len());
     crate::out!("  不透明类型  : {:?}", ir.opaque_types.iter().collect::<Vec<_>>());
     Ok(())
+}
+
+/// 多文件依赖校验：多个输入构成一个工程
+fn do_deps() -> Result<()> {
+    let line = prompt("IDL 文件路径（空格分隔，多个即构成一个工程）")?;
+    if line.is_empty() { crate::out!("  已取消。"); return Ok(()); }
+    let mut argv = vec!["xso-idlc".to_string(), "deps".to_string()];
+    for p in line.split_whitespace() {
+        argv.push("--input".into());
+        argv.push(p.to_string());
+    }
+    crate::cli::dispatch(&argv)
 }
 
 fn do_migrate() -> Result<()> {

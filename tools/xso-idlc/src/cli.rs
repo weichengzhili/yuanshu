@@ -10,16 +10,19 @@ use std::path::PathBuf;
 
 /// 所有一级子命令
 pub const COMMANDS: &[&str] = &[
-    "gen", "check", "ir", "diff", "migrate", "sbom",
+    "gen", "check", "ir", "diff", "deps", "migrate", "sbom",
     "doctor", "interactive", "version", "help", "completions",
 ];
 
 /// 通用选项（用于 completion 与 help）
 pub const FLAGS: &[&str] = &[
     "--input", "--anchor", "--cpp-out", "--rust-out", "--doc-out", "--test-out",
-    "--emit-ir", "--sbom", "--cache-dir", "--check", "--interactive",
-    "--help", "--version",
+    "--emit-ir", "--sbom", "--cache-dir", "--include-dir", "--strict", "--order",
+    "--check", "--interactive", "--help", "--version",
 ];
+
+/// 无取值的开关型选项（`Opts::flags` 收集）
+const VALUELESS_FLAGS: &[&str] = &["--strict", "--order", "--check", "--no-cache"];
 
 /// 子命令参数里是否含帮助标志
 fn has_help_flag(args: &[String]) -> bool {
@@ -54,6 +57,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         "check" => cmd_check(rest),
         "ir" => cmd_ir(rest),
         "diff" => cmd_diff(rest),
+        "deps" => cmd_deps(rest),
         "migrate" => cmd_migrate(rest),
         "sbom" => cmd_sbom(rest),
         "doctor" => cmd_doctor(),
@@ -69,12 +73,18 @@ pub fn dispatch(args: &[String]) -> Result<()> {
 
 struct Opts {
     inputs: Vec<PathBuf>,
+    /// 模块搜索目录（`--include-dir`，可重复；也支持逗号分隔）
+    include_dirs: Vec<PathBuf>,
+    /// 出现过的开关型选项
+    flags: std::collections::BTreeSet<String>,
     map: std::collections::HashMap<String, String>,
 }
 
 impl Opts {
     fn parse(args: &[String]) -> Result<Self> {
         let mut inputs = Vec::new();
+        let mut include_dirs: Vec<PathBuf> = Vec::new();
+        let mut flags = std::collections::BTreeSet::new();
         let mut map = std::collections::HashMap::new();
         let mut i = 0;
         // 取值助手：越界即报错（而非 panic），实现「选项缺取值」校验
@@ -93,10 +103,18 @@ impl Opts {
                 "--base" => { map.insert("--base".into(), take(&mut i, "--base")?); }
                 "--json" => { map.insert("--json".into(), take(&mut i, "--json")?); }
                 "--cache-dir" => { map.insert("--cache-dir".into(), take(&mut i, "--cache-dir")?); }
+                "--include-dir" | "-I" => {
+                    let v = take(&mut i, "--include-dir")?;
+                    for part in v.split(',') {
+                        if !part.is_empty() { include_dirs.push(PathBuf::from(part)); }
+                    }
+                }
+                other if VALUELESS_FLAGS.contains(&other) => { flags.insert(other.to_string()); i += 1; }
                 other if other.starts_with("--") => {
                     // 允许 --k=v 与 --k v
                     if let Some((k, v)) = other.split_once('=') {
-                        map.insert(k.to_string(), v.to_string());
+                        if VALUELESS_FLAGS.contains(&k) { flags.insert(k.to_string()); }
+                        else { map.insert(k.to_string(), v.to_string()); }
                         i += 1;
                     } else {
                         map.insert(other.to_string(), take(&mut i, other)?);
@@ -105,9 +123,10 @@ impl Opts {
                 other => return Err(CompileError::new(format!("unexpected argument '{}'", other))),
             }
         }
-        Ok(Opts { inputs, map })
+        Ok(Opts { inputs, include_dirs, flags, map })
     }
     fn get(&self, k: &str) -> Option<&String> { self.map.get(k) }
+    fn has(&self, k: &str) -> bool { self.flags.contains(k) }
 }
 
 /// 由子命令选项拼出旧式 argv，复用既有 `run` 逻辑
@@ -238,6 +257,65 @@ fn cmd_diff(args: &[String]) -> Result<()> {
     for c in &changes { crate::out!("{}", c); }
     if changes.iter().any(|c| c.starts_with("[break]")) {
         return Err(CompileError::new("diff: breaking ABI change detected"));
+    }
+    Ok(())
+}
+
+/// 多文件依赖校验：解析 `use` 导入、校验模块与符号、检测依赖环、输出拓扑构建顺序
+fn cmd_deps(args: &[String]) -> Result<()> {
+    let o = Opts::parse(args)?;
+    if o.inputs.is_empty() {
+        return Err(CompileError::new("deps: missing --input <file.xso> (repeatable)"));
+    }
+    let strict = o.has("--strict");
+    let report = crate::deps::analyze(&o.inputs, &crate::deps::Options {
+        strict,
+        include_dirs: o.include_dirs.clone(),
+    });
+
+    if o.has("--order") {
+        // 机器可读：仅打印拓扑构建顺序
+        for m in &report.order { crate::out!("{}", m); }
+    } else {
+        let n_inputs = report.modules.iter().filter(|m| m.is_input).count();
+        crate::out!("xso-idlc deps - multi-file dependency check");
+        crate::out!("  inputs      : {} ({} module(s) in project)", n_inputs, report.modules.len());
+        crate::out!("");
+        for m in &report.modules {
+            crate::out!("  {} v{}  {}", m.name, m.version,
+                if m.is_input { "[input]" } else { "[dep]  " });
+            crate::out!("      file    : {}", m.file.display());
+            crate::out!("      exports : {}", if m.exports.is_empty() {
+                "(none)".to_string() } else { m.exports.join(", ") });
+            crate::out!("      deps    : {}", if m.deps.is_empty() {
+                "(none)".to_string() } else { m.deps.join(", ") });
+            if !m.imports.is_empty() { crate::out!("      imports : {}", m.imports.join(", ")); }
+        }
+        crate::out!("");
+        crate::out!("  edges       : {}", report.edges.len());
+        for (a, b) in &report.edges { crate::out!("    {} -> {}", a, b); }
+        crate::out!("  cycles      : {}", report.cycles.len());
+        for c in &report.cycles { crate::out!("    {}", c.join(" -> ")); }
+        crate::out!("  build order : {}", if report.order.is_empty() {
+            "(none)".to_string() } else { report.order.join(" -> ") });
+        crate::out!("");
+        for d in &report.diagnostics {
+            crate::out!("  {}", d.render().replace('\n', "\n  "));
+        }
+        crate::out!("  diagnostics : {} error(s), {} warning(s){}",
+            report.errors(), report.warnings(),
+            if strict { " (strict: warnings are errors)" } else { "" });
+    }
+
+    if let Some(path) = o.get("--json") {
+        std::fs::write(path, report.to_json()).map_err(|e| CompileError::new(
+            format!("cannot write {}: {}", path, e)))?;
+        crate::out!("  wrote dependency graph {}", path);
+    }
+
+    if report.is_fatal(strict) {
+        return Err(CompileError::new(format!(
+            "deps: {} error(s), {} warning(s)", report.errors(), report.warnings())));
     }
     Ok(())
 }
@@ -451,6 +529,28 @@ const COMMAND_DOCS: &[CommandDoc] = &[
             "xso-idlc diff --input new.xso --base old.irbin",
         ],
         see_also: &["ir", "check"],
+    },
+    CommandDoc {
+        name: "deps",
+        summary: "多文件依赖校验：模块图 / 符号解析 / 环检测 / 构建顺序",
+        usage: "xso-idlc deps --input <a.xso> [--input <b.xso> ...] [options]",
+        description:
+            "把多个 `--input` 视为一个工程：解析顶层 `use` 声明，校验被导入的模块与符号是否存在、\n\
+             是否存在自我导入 / 重复导入 / 与本地定义冲突、是否存在模块级依赖环，并计算拓扑构建顺序。\n\
+             未使用的导入默认告警，`--strict` 升级为错误。依赖模块可在 `--include-dir` 与输入所在目录自动发现。",
+        options: &[
+            "--input <path>      IDL 输入（可重复，构成一个工程）",
+            "--include-dir <dir> 模块搜索目录（可重复，或用逗号分隔）",
+            "--strict            警告升级为错误（CI 严格模式）",
+            "--order             只打印拓扑构建顺序（供构建系统消费）",
+            "--json <path>       导出依赖图 JSON（模块/边/顺序/环/诊断）",
+        ],
+        examples: &[
+            "xso-idlc deps --input net.xso --input app.xso",
+            "xso-idlc deps --input app.xso --include-dir idl --strict",
+            "xso-idlc deps --input app.xso --input net.xso --order",
+        ],
+        see_also: &["gen", "check", "ir"],
     },
     CommandDoc {
         name: "migrate",

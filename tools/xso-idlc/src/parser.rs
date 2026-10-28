@@ -4,6 +4,10 @@ use crate::lexer::{Lexer, Token, TokenKind};
 
 /// 记号数上限（资源限制，防超大/恶意输入）
 pub const MAX_TOKENS: usize = 200_000;
+/// 单文件 `use` 声明数上限
+pub const MAX_IMPORTS: usize = 256;
+/// 单条 `use` 中的符号数上限
+pub const MAX_IMPORT_NAMES: usize = 256;
 
 pub fn parse(src: &str) -> Result<Module> {
     let tokens = Lexer::new(src).tokenize()?;
@@ -87,6 +91,7 @@ impl Parser {
             TokenKind::KwType => "type".into(),
             TokenKind::KwConst => "const".into(),
             TokenKind::KwUse => "use".into(),
+            TokenKind::KwAs => "as".into(),
             TokenKind::KwAvailable => "available".into(),
             TokenKind::KwAdded => "added".into(),
             TokenKind::KwRemoved => "removed".into(),
@@ -174,15 +179,94 @@ impl Parser {
             }
         }
 
-        // 顶层条目：错误恢复，一次收集全部错误
+        // 顶层：先吸收所有 `use` 导入声明，再解析条目（错误恢复，一次收集全部错误）
         let mut items = Vec::new();
+        let mut imports = Vec::new();
         while !self.check(&TokenKind::Eof) {
+            if self.check(&TokenKind::KwUse) {
+                match self.parse_import() {
+                    Ok(imp) => {
+                        if imports.len() >= MAX_IMPORTS {
+                            self.errors.push(CompileError::new(format!(
+                                "too many 'use' declarations (limit {})", MAX_IMPORTS)));
+                            self.recover_item();
+                        } else {
+                            imports.push(imp);
+                        }
+                    }
+                    Err(e) => { self.errors.push(e); self.recover_item(); }
+                }
+                continue;
+            }
             match self.parse_item() {
                 Ok(it) => items.push(it),
                 Err(e) => { self.errors.push(e); self.recover_item(); }
             }
         }
-        Ok(Module { name, version, items })
+        Ok(Module { name, version, items, imports })
+    }
+
+    /// `use <module>;` | `use <module>::<Name>;` | `use <module>::{A, B};`
+    /// | `use <module>::<Name> as <Alias>;`
+    fn parse_import(&mut self) -> Result<Import> {
+        let start = self.peek_tok();
+        let (line, col) = (start.line, start.col);
+        self.expect(&TokenKind::KwUse, "'use'")?;
+
+        // 路径段：连 `::` 一起记录（用于报错展示与模块名取最后一段）
+        let mut segs: Vec<(String, usize, usize)> = Vec::new();
+        loop {
+            let (l, c) = { let t = self.peek_tok(); (t.line, t.col) };
+            let s = self.expect_ident_or_kw()?;
+            segs.push((s, l, c));
+            if self.check(&TokenKind::ColonColon) { self.advance(); continue; }
+            break;
+        }
+
+        let mut names: Vec<ImportName> = Vec::new();
+        if self.check(&TokenKind::LBrace) {
+            self.advance();
+            loop {
+                if self.check(&TokenKind::RBrace) { self.advance(); break; }
+                let (l, c) = { let t = self.peek_tok(); (t.line, t.col) };
+                let name = self.expect_ident_or_kw()?;
+                let alias = if self.check(&TokenKind::KwAs) {
+                    self.advance();
+                    Some(self.expect_ident_or_kw()?)
+                } else { None };
+                names.push(ImportName { name, alias, line: l, col: c });
+                if self.check(&TokenKind::Comma) { self.advance(); continue; }
+                if self.check(&TokenKind::RBrace) { self.advance(); break; }
+                let t = self.peek_tok();
+                return Err(CompileError::new(
+                    "expected ',' or '}' in use list").at(t.line, t.col));
+            }
+        } else if self.check(&TokenKind::KwAs) {
+            if segs.len() < 2 {
+                let t = self.peek_tok();
+                return Err(CompileError::new(
+                    "module-level import cannot be aliased; import a symbol instead")
+                    .at(t.line, t.col));
+            }
+            let (name, l, c) = segs.pop().unwrap();
+            self.advance();
+            let alias = self.expect_ident_or_kw()?;
+            names.push(ImportName { name, alias: Some(alias), line: l, col: c });
+        } else if segs.len() >= 2 {
+            // `use net::SockAddr;` —— 最后一段是符号，其余是模块路径
+            let (name, l, c) = segs.pop().unwrap();
+            names.push(ImportName { name, alias: None, line: l, col: c });
+        }
+        // segs.len() == 1 且后面直接是 `;` —— 整模块导入
+
+        if names.len() > MAX_IMPORT_NAMES {
+            return Err(CompileError::new(format!(
+                "too many symbols in one 'use' (limit {})", MAX_IMPORT_NAMES)).at(line, col));
+        }
+
+        self.expect(&TokenKind::Semicolon, "';' after use")?;
+        let path = segs.into_iter().map(|(s, _, _)| s).collect();
+        Ok(Import { path, names, line, col })
     }
 
     fn parse_item(&mut self) -> Result<Item> {
@@ -196,12 +280,10 @@ impl Parser {
             TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface(opaque)?)),
             TokenKind::KwType => Ok(Item::TypeAlias(self.parse_type_alias()?)),
             TokenKind::KwUse => {
-                self.skip_use()?;
-                if self.check(&TokenKind::Eof) {
-                    Err(CompileError::new("use at end of file"))
-                } else {
-                    self.parse_item()
-                }
+                let t = self.peek_tok();
+                Err(CompileError::new(
+                    "misplaced 'use': imports must appear at top level (before any item)")
+                    .at(t.line, t.col))
             }
             other => {
                 let t = self.peek_tok();
@@ -212,14 +294,7 @@ impl Parser {
         }
     }
 
-    fn skip_use(&mut self) -> Result<()> {
-        self.advance();
-        while !self.check(&TokenKind::Semicolon) && !self.check(&TokenKind::Eof) {
-            self.advance();
-        }
-        if self.check(&TokenKind::Semicolon) { self.advance(); }
-        Ok(())
-    }
+
 
     fn parse_enum(&mut self) -> Result<EnumDef> {
         self.expect(&TokenKind::KwEnum, "'enum'")?;

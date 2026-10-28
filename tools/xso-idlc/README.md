@@ -32,6 +32,7 @@ cargo test                     # 运行内置测试（含生成确定性、ABI d
 | `check` | 仅校验磁盘产物是否最新（CI 门禁，不写盘） |
 | `ir` | 打印 ABI 指纹 / IR 摘要（`--json` / `--bin` 可导出） |
 | `diff` | 与基线做 ABI 差异比对（破坏性变更标记 `[break]`） |
+| `deps` | **多文件依赖校验**：模块图 / 符号解析 / 环检测 / 拓扑构建顺序（见 §3.2） |
 | `migrate` | 就地升级旧版 IDL 语法（幂等） |
 | `sbom` | 导出 CycloneDX SBOM（记录产物 SHA-256） |
 | `doctor` | 自检：示例可解析、生成确定性、缓存可写 |
@@ -53,6 +54,9 @@ cargo test                     # 运行内置测试（含生成确定性、ABI d
 | `--emit-ir <path>` | 导出版本化 IR（JSON） |
 | `--sbom <path>` | 导出 SBOM（也可用 `sbom` 子命令） |
 | `--cache-dir <path>` | 增量缓存目录（默认 `.xso-cache`） |
+| `-I, --include-dir <dir>` | 多文件依赖的模块搜索目录（可重复；自动包含各输入所在目录） |
+| `--strict` | 严格模式：依赖告警（如未使用导入）升级为错误 |
+| `--order` | 只打印拓扑构建顺序（`deps` 子命令，供构建系统消费） |
 | `--jobs <N>` | 并行构建线程上限（默认：全部核心） |
 | `--no-cache` | 禁用增量缓存，强制全量重建 |
 | `-h, --help` | 帮助（全局或子命令级） |
@@ -118,7 +122,7 @@ type Handle = @owned Connection
 顶层条目：`enum` / `error` / `struct` / `interface` / `type`（别名）。
 - `enum` 底层类型默认 `u32`；`error` 底层类型默认 `i32`。变体必须显式 `name = 整数`。
 - `struct` 可带泛型参数：`struct Wrapper<T, U> { ... }`（见 §5）。
-- 行尾可用 `;` 或 `,` 分隔；`use ...;` 导入语句会被跳过。
+- 行尾可用 `;` 或 `,` 分隔；顶层 `use ...;` 为跨模块导入声明（单文件编译时忽略，多文件工程下参与依赖校验，见 §3.2）。
 
 ### 3.1 嵌套数据结构模型
 
@@ -160,6 +164,46 @@ struct Node {                 // 递归通过 Vec 容器打破（而非按值自
 ```
 
 > 边界：嵌套本身无额外层数限制，但**类型嵌套深度上限为 32**（含泛型展开，见 §6.4）；按值内嵌的不透明类型、按值自引用循环等仍受 §6 约束。
+
+### 3.2 多文件依赖（`use` / 模块图）
+
+单个 `.xso` 内部自洽只是最低要求；**多个 `--input` 构成一个工程**，工具会先做跨文件依赖校验，任何错误都会中止生成：
+
+```xso
+// base.xso
+@module(base)
+@version(1)
+enum Color : u32 { Red = 1, Green = 2 }
+struct Point { x: i32, y: i32 }
+```
+
+```xso
+// app.xso
+@module(app)
+@version(2)
+use base::{Point, Color};        // 具名导入
+use base::Point as P;            // 带别名（可选）
+use base;                        // 整模块导入（全部导出符号可见）
+
+struct Rect { a: Point, c: Color }
+```
+
+- **依赖必须显式声明**：跨模块引用只能来自顶层 `use`，不存在隐式全局命名空间。
+- **模块解析**：被导入模块必须在输入集合中，或能在 `--include-dir`（以及各输入所在目录）里按 `<module>.xso` 找到。
+- **符号解析**：被导入符号必须存在于目标模块的导出中（导出 = 该模块全部顶层条目）。
+- **禁止**：自我导入、重复导入（同一本地名来自不同来源）、与本地定义冲突、导入符号互相碰撞。
+- **依赖环**：模块级依赖成环则无法拓扑排序，直接报错并给出环路径。
+- **未使用导入**：默认告警，`--strict` 升级为错误。
+
+```bash
+xso-idlc deps --input idl/app.xso --input idl/base.xso      # 打印模块图 / 边 / 顺序 / 诊断
+xso-idlc deps --input idl/app.xso -I idl --strict            # 自动发现依赖 + 严格模式
+xso-idlc deps --input idl/app.xso --input idl/base.xso --order # 只打印构建顺序
+xso-idlc deps --input idl/app.xso -I idl --json deps.json      # 导出依赖图 JSON
+xso-idlc gen  --input idl/app.xso --input idl/base.xso        # 通过校验后才生成
+```
+
+**链接语义**：被导入的符号（连同其传递依赖）会在校验通过后**按值克隆进导入方模块**，因此每个模块的产物都是自包含的；由于两端使用同一套布局算法，克隆出来的类型在源模块与导入方模块布局常量完全一致，跨模块传递时 ABI 不变。
 
 ---
 
